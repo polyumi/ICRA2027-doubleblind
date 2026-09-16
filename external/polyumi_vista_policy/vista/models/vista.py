@@ -37,7 +37,7 @@ from vista.policy.base import PROPRIO_KEYS, BaseVistaPolicy
 from vista.preproc.log_mel import mic_rows_to_waveform, shared_log_mel
 
 
-class MitasPolicy(BaseVistaPolicy):
+class VisTAPolicy(BaseVistaPolicy):
     """Wrist / finger / audio / proprio → Transformer fusion → DiT + FM/DDPM."""
 
     RGB_STRIDE = 32
