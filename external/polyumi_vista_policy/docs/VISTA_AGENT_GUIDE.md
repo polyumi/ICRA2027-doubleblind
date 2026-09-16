@@ -12,7 +12,7 @@ Each model is **one `nn.Module` class** subclassing [`BaseVistaPolicy`](../vista
 | `SparshXPolicy` | `vista/config/train_sparsh_x.yaml` |
 | `PolyTouchPolicy` | `vista/config/train_polytouch.yaml` |
 | `QformerPolicy` | `vista/config/train_qformer.yaml` (+ optional `ablation={v,vt,va,vta}`) |
-| `MitasPolicy` | `vista/config/train_mitas.yaml` (+ optional `ablation={v,vt,va,vta}`) |
+| `VisTAPolicy` | `vista/config/train_vista.yaml` (+ optional `ablation={v,vt,va,vta}`) |
 
 ```
 obs (B, N, …)
@@ -22,20 +22,20 @@ obs (B, N, …)
   → action chunk (B, H, 10)
 ```
 
-Observation history: `task.n_obs_history=2` with `ds=3` (~100 ms) for wrist, finger, and proprio; `task.audio_obs_horizon=10` contiguous mic rows (no downsample) → shared log-mel for SHF / Sparsh / Qformer / Mitas. See [`SENSOR_PROCESSING.md`](SENSOR_PROCESSING.md).
+Observation history: `task.n_obs_history=2` with `ds=3` (~100 ms) for wrist, finger, and proprio; `task.audio_obs_horizon=10` contiguous mic rows (no downsample) → shared log-mel for SHF / Sparsh / Qformer / VisTA. See [`SENSOR_PROCESSING.md`](SENSOR_PROCESSING.md).
 
-Qformer / Mitas sensor ablation: compose `ablation={v,vt,va,vta}` (sets `policy.sensor_group`). Dropped sensors are not encoded; context shrinks only. Proprio always kept.
+Qformer / VisTA sensor ablation: compose `ablation={v,vt,va,vta}` (sets `policy.sensor_group`). Dropped sensors are not encoded; context shrinks only. Proprio always kept.
 
 ## Entry points
 
 - `python train_vista.py --config-name=train_see_hear_feel`
 - `python train_vista.py --config-name=train_qformer`                         # full vta
-- `python train_vista.py --config-name=train_mitas`                           # CNN → TransformerEncoder → DiT
+- `python train_vista.py --config-name=train_vista`                           # CNN → TransformerEncoder → DiT
 - `python train_vista.py --config-name=train_qformer ablation=v`              # wrist only
 - `python train_vista.py --config-name=train_qformer ablation=vt`             # wrist + finger
 - `python train_vista.py --config-name=train_qformer ablation=va`             # wrist + mic
 - `python train_vista.py --config-name=train_qformer ablation=vta`            # wrist + finger + mic
-- `./scripts/train_day0suite.sh --model mitas`
+- `./scripts/train_day0suite.sh --model vista`
 - `./scripts/train_day0suite.sh --model qformer -- ablation=vt`
 - Tests: `python -m pytest test/test_vista_shapes.py test/test_sensor_ablation.py test/test_vista_dataset.py -q`
 
@@ -48,7 +48,7 @@ vista/
   models/sparsh_x.py      # SparshXPolicy
   models/polytouch.py     # PolyTouchPolicy
   models/qformer.py       # QformerPolicy (CNN → Q-Former → DiT)
-  models/mitas.py         # MitasPolicy (CNN → TransformerEncoder → DiT)
+  models/vista.py         # VisTAPolicy (CNN → TransformerEncoder → DiT)
   encoders/cnn.py         # Vision / tactile / audio CNN stems
   encoders/shf_resnet.py  # SHF CoordConv ResNet (vendored MIT)
   fusion/mbt.py           # MBT reimplementation (not Meta code)
