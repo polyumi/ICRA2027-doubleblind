@@ -3,7 +3,7 @@ defaults:
   - task: vista_multimodal
   - ablation: none
 
-name: train_mitas
+name: train_vista
 _target_: vista.workspace.train_vista_workspace.TrainVistaWorkspace
 
 task_name: ${task.name}
@@ -13,7 +13,7 @@ exp_name: default
 n_action_steps: 8
 
 policy:
-  _target_: vista.models.mitas.MitasPolicy
+  _target_: vista.models.vista.VisTAPolicy
   shape_meta: ${shape_meta}
   n_obs_steps: ${task.n_obs_history}
   sensor_group: vta
