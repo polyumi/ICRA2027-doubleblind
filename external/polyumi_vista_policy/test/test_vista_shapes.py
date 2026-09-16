@@ -13,7 +13,7 @@ from vista.models.polytouch import PolyTouchPolicy
 from vista.models.see_hear_feel import SeeHearFeelPolicy
 from vista.models.sparsh_x import SparshXPolicy
 from vista.models.qformer import QformerPolicy
-from vista.models.mitas import MitasPolicy
+from vista.models.vista import VisTAPolicy
 from vista.models.vta_diffusion import VTADiffusionPolicy
 from vista.encoders.cnn import AudioCNNStem, VisionCNNStem
 from vista.preproc.log_mel import mic_rows_to_waveform, shared_log_mel
@@ -255,9 +255,9 @@ def test_vista_forward_and_loss():
     assert pred["action"].shape == (2, 16, 10)
 
 
-def test_mitas_forward_and_loss():
+def test_vista_forward_and_loss():
     shape = _shape_meta(img=64)
-    policy = MitasPolicy(
+    policy = VisTAPolicy(
         shape,
         n_obs_steps=N_OBS,
         sensor_group="vta",
@@ -286,7 +286,7 @@ def test_mitas_forward_and_loss():
     assert pred["action"].shape == (2, 16, 10)
 
 
-def _mitas_lite_kwargs():
+def _vista_lite_kwargs():
     return dict(
         d_embed=64,
         fusion_layers=1,
@@ -300,16 +300,16 @@ def _mitas_lite_kwargs():
     )
 
 
-def test_mitas_diffusion_objective_forward_and_loss():
+def test_vista_diffusion_objective_forward_and_loss():
     shape = _shape_meta(img=64)
-    policy = MitasPolicy(
+    policy = VisTAPolicy(
         shape,
         n_obs_steps=N_OBS,
         sensor_group="vta",
         objective_type="diffusion",
         num_train_timesteps=4,
         input_perturb=0.1,
-        **_mitas_lite_kwargs(),
+        **_vista_lite_kwargs(),
     )
     from vista.objectives.diffusion import DiffusionObjective
 
@@ -322,18 +322,18 @@ def test_mitas_diffusion_objective_forward_and_loss():
     assert pred["action"].shape == (2, 16, 10)
 
 
-def test_mitas_per_sensor_fusion_same_token_count():
+def test_vista_per_sensor_fusion_same_token_count():
     shape = _shape_meta(img=64)
     batch = _synthetic_batch(img=64)
-    joint = MitasPolicy(
-        shape, n_obs_steps=N_OBS, sensor_group="vta", fusion_mode="joint", **_mitas_lite_kwargs()
+    joint = VisTAPolicy(
+        shape, n_obs_steps=N_OBS, sensor_group="vta", fusion_mode="joint", **_vista_lite_kwargs()
     )
-    per = MitasPolicy(
+    per = VisTAPolicy(
         shape,
         n_obs_steps=N_OBS,
         sensor_group="vta",
         fusion_mode="per_sensor",
-        **_mitas_lite_kwargs(),
+        **_vista_lite_kwargs(),
     )
     from vista.fusion.per_sensor_transformer import PerSensorTransformerFusion
     from vista.fusion.transformer import TransformerFusion
