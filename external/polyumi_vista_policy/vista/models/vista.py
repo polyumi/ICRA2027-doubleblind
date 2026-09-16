@@ -1,5 +1,5 @@
 """
-MitasPolicy — CNN stems → Transformer fusion → DiT + flow matching / DDPM.
+VisTAPolicy — CNN stems → Transformer fusion → DiT + flow matching / DDPM.
 
 Same tokenization as QformerPolicy (CNN stems, spatial/temporal embeds, shared
 log-mel), but fuses the full high-token context with a TransformerEncoder
