@@ -1,6 +1,6 @@
 """Vista multimodal models — paper baselines + Qformer / Mitas / VTADiffusion."""
 
-from vista.models.mitas import MitasPolicy
+from vista.models.vista import VisTAPolicy
 from vista.models.polytouch import PolyTouchPolicy
 from vista.models.qformer import QformerPolicy
 from vista.models.see_hear_feel import SeeHearFeelPolicy
@@ -12,6 +12,6 @@ __all__ = [
     "SparshXPolicy",
     "PolyTouchPolicy",
     "QformerPolicy",
-    "MitasPolicy",
+    "VisTAPolicy",
     "VTADiffusionPolicy",
 ]
