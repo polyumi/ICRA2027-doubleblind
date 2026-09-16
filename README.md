@@ -306,14 +306,6 @@ The `pi` extra pulls in the Raspberry Pi hardware-only dependencies (`lgpio`, `g
 
 Run `polyumi-pi --help` for a full list of commands.
 
-## Citation
-
-This system was previously described in a workshop paper. The citation is **withheld for
-double-blind review** and will be restored in the camera-ready version.
-
-If you wish to cite the full tactile learning system (including models, datasets, inference
-pipeline, etc), please note that this will be released in an upcoming work.
-
 ## Acknowledgments & Maintenance
 
 Author and institutional affiliation details are **withheld for double-blind review**.
