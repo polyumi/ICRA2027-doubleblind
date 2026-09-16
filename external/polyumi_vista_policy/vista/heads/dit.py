@@ -1,4 +1,4 @@
-"""Transformer denoiser head (mitas port)."""
+"""Transformer denoiser head (VisTA port)."""
 
 from typing import Optional
 
