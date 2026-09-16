@@ -12,7 +12,7 @@ class VistaPolicy(BaseImagePolicy):
       - vista.models.sparsh_x.SparshXPolicy
       - vista.models.polytouch.PolyTouchPolicy
       - vista.models.qformer.QformerPolicy
-      - vista.models.mitas.MitasPolicy
+      - vista.models.vista.VisTAPolicy
       - vista.models.vta_diffusion.VTADiffusionPolicy
     """
 
@@ -20,6 +20,6 @@ class VistaPolicy(BaseImagePolicy):
         raise RuntimeError(
             "VistaPolicy (config-assembled conditioner) was removed. "
             "Point Hydra _target_ at SeeHearFeelPolicy, SparshXPolicy, "
-            "PolyTouchPolicy, QformerPolicy, MitasPolicy, or VTADiffusionPolicy "
+            "PolyTouchPolicy, QformerPolicy, VisTAPolicy, or VTADiffusionPolicy "
             "(all subclass BaseVistaPolicy)."
         )
