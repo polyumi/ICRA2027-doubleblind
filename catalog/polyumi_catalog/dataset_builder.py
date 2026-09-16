@@ -1,0 +1,153 @@
+"""
+Multi-scene dataset builder & export (Phase 3).
+
+Combines whole scenes into one UMI-format ReplayBuffer, per the "ingest owns
+preprocessing/export, catalog only imports it" decision — the
+same pattern already used for Phase 2.5's MCAP export. Exports the buffer first and only then
+writes the dataset manifest (§3.2) beside it, so a failed/interrupted export never leaves a
+manifest pointing at nonexistent data. The manifest is the authoritative record; the DB rows
+are a cache of it (rebuildable by ``sync.sync_datasets``, same principle as scene->task in §3.1).
+
+Dataset membership is whole-scene only for now (§10 decision 1) — every member's ``episodes``
+is ``"all"``; per-episode selection is a non-breaking extension the schema already allows.
+"""
+
+from __future__ import annotations
+
+import pathlib
+import subprocess
+
+from sqlmodel import Session as DBSession
+from sqlmodel import select
+
+from polyumi_ingest import timing
+from polyumi_ingest.export.dp import MIN_SEGMENT_STEPS
+
+from polyumi_catalog.manifests import DatasetManifest, DatasetMemberSpec
+from polyumi_catalog.models import Dataset, DatasetMember, Scene, Task
+
+
+class DatasetBuildError(ValueError):
+    """A dataset build was rejected (invalid input) or the underlying export failed."""
+
+
+#: Matches ``pingest export --type``'s values: ``'dp'`` (visuomotor only) vs ``'polyumi'`` (adds
+#: every PolyUMI modality — the contact mic, which needs preprocessing step 6, and the finger
+#: camera, which needs no step of its own). See ``polyumi_ingest.export.dp``.
+_EXPORTER_TYPES = ('dp', 'polyumi')
+
+
+def _repo_git_hash() -> str | None:
+    """Best-effort short-circuit git hash of this checkout, for the manifest's provenance field."""
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def build_dataset(
+    db: DBSession,
+    *,
+    name: str,
+    task_id: int | None,
+    scene_ids: list[str],
+    output_dir: pathlib.Path,
+    exporter_type: str,
+) -> Dataset:
+    """
+    Export ``scene_ids`` into one UMI ReplayBuffer named ``name`` and record it as a Dataset.
+
+    Writes ``<output_dir>/<name>.zarr.zip`` and its provenance manifest
+    ``<output_dir>/<name>.dataset.json`` before touching the DB, then upserts the Dataset +
+    DatasetMember rows. Raises :class:`DatasetBuildError` for invalid input or if the export
+    itself fails (in which case nothing is written and no DB rows are created).
+
+    ``exporter_type`` selects which ``polyumi_ingest.export.dp`` entry point runs: ``'dp'`` for
+    the visuomotor-only ReplayBuffer, ``'polyumi'`` to add every PolyUMI modality — the contact
+    mic (requires preprocessing step 6 on every member scene) and the finger camera (requires
+    none, but is ~13x the bytes of ``camera0_rgb``, so a ``'polyumi'`` buffer is much larger).
+    """
+    if exporter_type not in _EXPORTER_TYPES:
+        raise DatasetBuildError(f'Unknown exporter type {exporter_type!r}; must be one of {_EXPORTER_TYPES}.')
+    if exporter_type == 'polyumi':
+        from polyumi_ingest.export.dp import export_scenes_to_polyumi as export_fn
+    else:
+        from polyumi_ingest.export.dp import export_scenes_to_dp as export_fn
+
+    name = name.strip()
+    if not name:
+        raise DatasetBuildError('Dataset name cannot be empty.')
+    if db.exec(select(Dataset).where(Dataset.name == name)).first() is not None:
+        raise DatasetBuildError(f'Dataset {name!r} already exists.')
+    if not scene_ids:
+        raise DatasetBuildError('Select at least one scene.')
+
+    scenes: list[Scene] = []
+    for scene_id in scene_ids:
+        scene = db.get(Scene, scene_id)
+        if scene is None:
+            raise DatasetBuildError(f'No such scene: {scene_id}')
+        scenes.append(scene)
+
+    task_name = None
+    if task_id is not None:
+        task = db.get(Task, task_id)
+        if task is None:
+            raise DatasetBuildError(f'No such task: {task_id}')
+        task_name = task.name
+
+    output_path = output_dir / f'{name}.zarr.zip'
+    manifest_path = output_dir / f'{name}.dataset.json'
+
+    scene_paths = [pathlib.Path(s.dir) for s in scenes]
+    try:
+        n_episodes, pose_provenance = export_fn(scene_paths, output_path)
+    except (FileNotFoundError, ValueError, RuntimeError) as err:
+        raise DatasetBuildError(str(err)) from err
+
+    # From disk, not the DB rows: the same helper `pingest export` logs from, so a dataset
+    # built here and one built from the CLI report the same seconds.
+    totals = timing.dataset_time_totals(scene_paths, pose_provenance)
+
+    manifest = DatasetManifest(
+        name=name,
+        task=task_name,
+        output=output_path.name,
+        n_episodes=n_episodes,
+        polyumi_version=_repo_git_hash(),
+        members=[DatasetMemberSpec(scene_id=s.scene_id, scene_dir=s.dir, episodes='all') for s in scenes],
+        pose_provenance=pose_provenance,
+        exporter_type=exporter_type,
+        # This build path deliberately exposes no knobs, so the values it used are whatever the
+        # exporter's defaults were on the day — record them, or a change to a default silently
+        # rewrites what every catalog-built dataset means with nothing on disk to show it.
+        export_params={'min_segment_steps': MIN_SEGMENT_STEPS},
+        **totals,
+    )
+    manifest.to_file(manifest_path)
+
+    dataset = Dataset(
+        name=name,
+        task_id=task_id,
+        manifest_path=str(manifest_path),
+        output_path=str(output_path),
+        n_episodes=n_episodes,
+        polyumi_version=manifest.polyumi_version,
+        exporter_type=exporter_type,
+        **totals,
+    )
+    db.add(dataset)
+    db.flush()  # assign dataset.id
+    for scene in scenes:
+        db.add(DatasetMember(dataset_id=dataset.id, scene_id=scene.scene_id, episodes='all'))
+    db.commit()
+    db.refresh(dataset)
+    return dataset

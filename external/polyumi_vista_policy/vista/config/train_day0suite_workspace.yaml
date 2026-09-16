@@ -1,0 +1,87 @@
+defaults:
+  - _self_
+  - task: day0suite
+
+# Legacy day0suite workspace — prefer train_see_hear_feel / train_sparsh_x / train_polytouch.
+name: train_day0suite
+_target_: vista.workspace.train_vista_workspace.TrainVistaWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: see_hear_feel
+
+n_action_steps: 8
+
+policy:
+  _target_: vista.models.see_hear_feel.SeeHearFeelPolicy
+  shape_meta: ${shape_meta}
+  n_obs_steps: ${task.n_obs_steps}
+  d_embed: 128
+  n_heads: 4
+  mlp_hidden: 1024
+  encoder_ckpt: null
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 64
+  num_workers: 4
+  shuffle: true
+  pin_memory: true
+  persistent_workers: false
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 4
+  shuffle: false
+  pin_memory: true
+  persistent_workers: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  encoder_lr: 3.0e-5
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+training:
+  device: cuda:0
+  seed: 42
+  debug: false
+  resume: false
+  lr_scheduler: constant_with_warmup
+  lr_warmup_steps: 2000
+  max_epochs: null
+  gradient_accumulate_every: 1
+  use_ema: true
+  checkpoint_every: 10
+  val_every: 1
+
+logging:
+  project: ${oc.env:WANDB_PROJECT,day0suite}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${exp_name}_${task_name}
+  tags: ["day0suite", "${exp_name}", "${task_name}"]
+
+checkpoint:
+  topk:
+    monitor_key: val_loss
+    mode: min
+    k: 0
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt'
+  save_last_ckpt: true
+
+hydra:
+  run:
+    dir: data/outputs/day0suite/${exp_name}/${now:%Y.%m.%d-%H.%M.%S}
+  sweep:
+    dir: data/outputs/day0suite/multirun/${now:%Y.%m.%d-%H.%M.%S}
+    subdir: ${exp_name}

@@ -1,0 +1,366 @@
+<?xml version="1.0" ?>
+<!--
+  Sensor demo world for the Mobile FR3 Duo.
+  12 x 12 m enclosed room with coloured obstacles at varying
+  heights and distances so cameras, lidars and IMU all have
+  meaningful data to look at.
+
+  Robot spawns at the origin facing +x.
+-->
+<sdf version="1.6">
+  <world name="sensor_demo">
+
+    <!-- ================================================================ -->
+    <!-- PHYSICS                                                           -->
+    <!-- ================================================================ -->
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- ================================================================ -->
+    <!-- SYSTEM PLUGINS                                                    -->
+    <!-- ================================================================ -->
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-contact-system"
+            name="gz::sim::systems::Contact"/>
+    <!-- Camera and lidar rendering -->
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <!-- IMU -->
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu"/>
+
+    <!-- ================================================================ -->
+    <!-- LIGHTING                                                          -->
+    <!-- ================================================================ -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.85 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <attenuation>
+        <range>1000</range><constant>0.9</constant>
+        <linear>0.01</linear><quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Four ceiling point lights for even camera illumination -->
+    <light type="point" name="ceil_ne">
+      <pose>4 4 2.4 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse><specular>0.2 0.2 0.2 1</specular>
+      <attenuation><range>12</range><constant>0.4</constant>
+        <linear>0.05</linear><quadratic>0.01</quadratic></attenuation>
+      <cast_shadows>false</cast_shadows>
+    </light>
+    <light type="point" name="ceil_nw">
+      <pose>-4 4 2.4 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse><specular>0.2 0.2 0.2 1</specular>
+      <attenuation><range>12</range><constant>0.4</constant>
+        <linear>0.05</linear><quadratic>0.01</quadratic></attenuation>
+      <cast_shadows>false</cast_shadows>
+    </light>
+    <light type="point" name="ceil_se">
+      <pose>4 -4 2.4 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse><specular>0.2 0.2 0.2 1</specular>
+      <attenuation><range>12</range><constant>0.4</constant>
+        <linear>0.05</linear><quadratic>0.01</quadratic></attenuation>
+      <cast_shadows>false</cast_shadows>
+    </light>
+    <light type="point" name="ceil_sw">
+      <pose>-4 -4 2.4 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse><specular>0.2 0.2 0.2 1</specular>
+      <attenuation><range>12</range><constant>0.4</constant>
+        <linear>0.05</linear><quadratic>0.01</quadratic></attenuation>
+      <cast_shadows>false</cast_shadows>
+    </light>
+
+    <!-- ================================================================ -->
+    <!-- GROUND PLANE                                                      -->
+    <!-- ================================================================ -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material>
+            <ambient>0.45 0.45 0.45 1</ambient>
+            <diffuse>0.45 0.45 0.45 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================================================================ -->
+    <!-- ROOM WALLS  (12 x 12 m interior, 2.5 m tall)                    -->
+    <!-- ================================================================ -->
+    <model name="wall_north">
+      <static>true</static><pose>0 6 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>12.4 0.2 2.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>12.4 0.2 2.5</size></box></geometry>
+          <material><ambient>0.82 0.82 0.78 1</ambient><diffuse>0.82 0.82 0.78 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_south">
+      <static>true</static><pose>0 -6 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>12.4 0.2 2.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>12.4 0.2 2.5</size></box></geometry>
+          <material><ambient>0.82 0.82 0.78 1</ambient><diffuse>0.82 0.82 0.78 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_east">
+      <static>true</static><pose>6 0 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 12.4 2.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 12.4 2.5</size></box></geometry>
+          <material><ambient>0.82 0.82 0.78 1</ambient><diffuse>0.82 0.82 0.78 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_west">
+      <static>true</static><pose>-6 0 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 12.4 2.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 12.4 2.5</size></box></geometry>
+          <material><ambient>0.82 0.82 0.78 1</ambient><diffuse>0.82 0.82 0.78 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================================================================ -->
+    <!-- OBSTACLES                                                         -->
+    <!-- All placed so cameras (front/rear/left/right) and both lidars    -->
+    <!-- (safety scanners at ~19 cm height, up to 10 m range) see them.  -->
+    <!-- ================================================================ -->
+
+    <!-- RED box — directly ahead of robot (~2.5 m, front camera + lidar) -->
+    <model name="box_red">
+      <static>true</static><pose>2.5 0 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material>
+            <ambient>0.85 0.12 0.12 1</ambient><diffuse>0.85 0.12 0.12 1</diffuse>
+            <specular>0.4 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- BLUE tall pillar — front-left (camera + lidar) -->
+    <model name="pillar_blue">
+      <static>true</static><pose>1.8 2.2 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.35 0.35 1.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.35 0.35 1.5</size></box></geometry>
+          <material>
+            <ambient>0.1 0.15 0.85 1</ambient><diffuse>0.1 0.15 0.85 1</diffuse>
+            <specular>0.1 0.1 0.4 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- YELLOW cylinder — front-right (front + right camera, front lidar) -->
+    <model name="cylinder_yellow">
+      <static>true</static><pose>2.2 -2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.3</radius><length>1.0</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.3</radius><length>1.0</length></cylinder></geometry>
+          <material>
+            <ambient>0.95 0.82 0.1 1</ambient><diffuse>0.95 0.82 0.1 1</diffuse>
+            <specular>0.3 0.3 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- GREEN crate stack — left side (left camera + front lidar) -->
+    <model name="crate_green_bottom">
+      <static>true</static><pose>-0.8 2.8 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 0.5 0.4</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.8 0.5 0.4</size></box></geometry>
+          <material><ambient>0.1 0.72 0.1 1</ambient><diffuse>0.1 0.72 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="crate_green_top">
+      <static>true</static><pose>-0.8 2.8 0.62 0 0 0.5</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.5 0.5 0.4</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.5 0.5 0.4</size></box></geometry>
+          <material><ambient>0.1 0.5 0.1 1</ambient><diffuse>0.1 0.5 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ORANGE box — rear-left (rear camera + rear lidar) -->
+    <model name="box_orange">
+      <static>true</static><pose>-2.5 1.0 0.35 0 0 0.3</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.7 0.7 0.7</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.7 0.7 0.7</size></box></geometry>
+          <material>
+            <ambient>0.95 0.42 0.08 1</ambient><diffuse>0.95 0.42 0.08 1</diffuse>
+            <specular>0.3 0.2 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- PURPLE cylinder — rear-right (rear + right camera, rear lidar) -->
+    <model name="cylinder_purple">
+      <static>true</static><pose>-2.2 -2.5 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.28</radius><length>0.8</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.28</radius><length>0.8</length></cylinder></geometry>
+          <material>
+            <ambient>0.55 0.1 0.75 1</ambient><diffuse>0.55 0.1 0.75 1</diffuse>
+            <specular>0.2 0.05 0.3 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- CYAN sphere on a pedestal — right side -->
+    <model name="pedestal">
+      <static>true</static><pose>3 -3.5 0.35 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.2</radius><length>0.7</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.2</radius><length>0.7</length></cylinder></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="sphere_cyan">
+      <static>true</static><pose>3 -3.5 0.85 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><sphere><radius>0.18</radius></sphere></geometry></collision>
+        <visual name="v"><geometry><sphere><radius>0.18</radius></sphere></geometry>
+          <material>
+            <ambient>0.05 0.85 0.85 1</ambient><diffuse>0.05 0.85 0.85 1</diffuse>
+            <specular>0.3 0.8 0.8 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- WOODEN TABLE with PINK sphere on top — north-east area -->
+    <model name="table_top">
+      <static>true</static><pose>3.8 3.2 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.2 0.6 0.05</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 0.6 0.05</size></box></geometry>
+          <material><ambient>0.58 0.38 0.18 1</ambient><diffuse>0.58 0.38 0.18 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="table_leg_fl">
+      <static>true</static><pose>3.25 3.45 0.36 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.05 0.05 0.72</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.05 0.05 0.72</size></box></geometry>
+          <material><ambient>0.4 0.25 0.1 1</ambient><diffuse>0.4 0.25 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="table_leg_fr">
+      <static>true</static><pose>4.35 3.45 0.36 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.05 0.05 0.72</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.05 0.05 0.72</size></box></geometry>
+          <material><ambient>0.4 0.25 0.1 1</ambient><diffuse>0.4 0.25 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="table_leg_rl">
+      <static>true</static><pose>3.25 2.95 0.36 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.05 0.05 0.72</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.05 0.05 0.72</size></box></geometry>
+          <material><ambient>0.4 0.25 0.1 1</ambient><diffuse>0.4 0.25 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="table_leg_rr">
+      <static>true</static><pose>4.35 2.95 0.36 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.05 0.05 0.72</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.05 0.05 0.72</size></box></geometry>
+          <material><ambient>0.4 0.25 0.1 1</ambient><diffuse>0.4 0.25 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="sphere_pink">
+      <static>true</static><pose>3.8 3.2 0.93 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><sphere><radius>0.15</radius></sphere></geometry></collision>
+        <visual name="v"><geometry><sphere><radius>0.15</radius></sphere></geometry>
+          <material>
+            <ambient>0.95 0.3 0.6 1</ambient><diffuse>0.95 0.3 0.6 1</diffuse>
+            <specular>0.5 0.2 0.4 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- WHITE structural pillars at room corners (lidar boundary markers) -->
+    <model name="pillar_ne">
+      <static>true</static><pose>5.7 5.7 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 0.3 2.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.3 0.3 2.5</size></box></geometry>
+          <material><ambient>0.95 0.95 0.95 1</ambient><diffuse>0.95 0.95 0.95 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="pillar_nw">
+      <static>true</static><pose>-5.7 5.7 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 0.3 2.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.3 0.3 2.5</size></box></geometry>
+          <material><ambient>0.95 0.95 0.95 1</ambient><diffuse>0.95 0.95 0.95 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="pillar_se">
+      <static>true</static><pose>5.7 -5.7 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 0.3 2.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.3 0.3 2.5</size></box></geometry>
+          <material><ambient>0.95 0.95 0.95 1</ambient><diffuse>0.95 0.95 0.95 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="pillar_sw">
+      <static>true</static><pose>-5.7 -5.7 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 0.3 2.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.3 0.3 2.5</size></box></geometry>
+          <material><ambient>0.95 0.95 0.95 1</ambient><diffuse>0.95 0.95 0.95 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

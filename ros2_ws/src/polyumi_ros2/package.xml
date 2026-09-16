@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>polyumi_ros2</name>
+  <version>0.0.1</version>
+  <description>Core ROS2 python nodes for the PolyUMI multimodal learning platform</description>
+  <maintainer email="anonymous@example.com">polyumi-authors</maintainer>
+  <license>MIT</license>
+
+  <!-- ament_copyright / ament_flake8 / ament_pep257 were dropped: this repo lints Python with
+       ruff (see pyproject.toml), and the ament defaults contradict it on line length and import
+       order, so `colcon test` failed regardless of whether real tests passed. ament_xmllint
+       stays — it validates package.xml against the ROS schema, which ruff does not do. -->
+  <test_depend>ament_xmllint</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <!-- The Franka stack (franka_bringup / franka_fr3_moveit_config) runs on the
+       FR3 NUC under ROS2 Humble, NOT in this Kilted workspace. It is reached
+       over DDS, so it is intentionally not a rosdep here. See docs/lab-fr3-inference.md. -->
+  <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>v4l2_camera</exec_depend>
+  <depend>polyumi_pi_msgs</depend>
+  <depend>rclpy</depend>
+  <!-- policy_client_node's HTTP client. requests, not urllib, for keep-alive: the inference POST
+       carries a few hundred kilobytes of observation and urllib opens a fresh connection per
+       call, paying a handshake and a slow-start ramp on every single inference. -->
+  <exec_depend>python3-requests</exec_depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>foxglove_msgs</depend>
+  <depend>tf2_ros</depend>
+  <!-- Phase 2: when execute_motion is on, the node publishes each action chunk as a
+       trajectory_msgs/MultiDOFJointTrajectory on /polyumi/target_poses_traj, which the
+       NUC-side streaming Cartesian impedance controller splices. geometry_msgs is still
+       needed for the Pose/PoseArray the chunk and its preview are built from. -->
+  <depend>geometry_msgs</depend>
+  <!-- Phase 2.5: the gripper half of the action chunk goes out separately, as a
+       trajectory_msgs/JointTrajectory on /polyumi/target_gripper. The pose chunk carries no
+       width, and the Franka Hand is action-only (no ros2_control interface), so it needs its
+       own channel and its own cadence. Consumed by franka_hand_node on the NUC — the franka_msgs
+       gripper actions are called from the NUC, not here. -->
+  <depend>trajectory_msgs</depend>
+  <!-- The chunk wire format itself, shared with the streaming impedance controller's other users.
+       polyumi_ros2/target_chunk.py re-exports it and adds this deployment's topic name. Built from
+       the symlink at ros2_ws/src/franka_streaming_impedance_client; declared here so colcon puts it
+       on the environment for `colcon test`, not just for a sourced install. -->
+  <depend>franka_streaming_impedance_client</depend>
+  <!-- On the inference path: camera_preproc's resize/crop and policy_client_node's use of it, plus
+       the QR encode/decode in latency_probe's camera mode. Undeclared until 2026-08-11 — it worked
+       only because python3-opencv happens to be installed system-wide, so the `rosdep install`
+       in the README left a fresh machine importing a cv2 nothing had asked for. -->
+  <exec_depend>python3-opencv</exec_depend>
+  <!-- latency_probe only: scipy carries the cross-correlation estimator in latency_util, and
+       matplotlib draws the correlation curve you judge a marginal run by. Neither is on the
+       inference path. The QR clock that mode:=camera films needs no package beyond the cv2
+       above — it encodes and decodes the codes itself. -->
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

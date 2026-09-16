@@ -1,0 +1,71 @@
+# Thresholds for judging and cutting episodes at export time.
+#
+# These are POLICY, not data. Nothing here is written into the pzarr, so editing this
+# file changes what the next export produces and what the catalog shows immediately —
+# no reprocessing. Consumed by the catalog UI (episode_quality.py) and by DP export
+# (export/dp/buffer.py).
+#
+# Unknown keys are ignored rather than rejected (quality.py filters to the dataclass
+# fields), so a local copy carrying a key this file no longer defines still loads — the
+# key simply does nothing.
+#
+# An episode explicitly listed in a scene's scene.json `unusable_episodes` is unusable
+# regardless of what's here. That human set is the only thing that discards an entire
+# session at export; everything below either cuts a session or badges it.
+
+# --- Segment cut thresholds (export/dp/buffer.py: plan_episode_segments) ---
+
+# Largest tolerated position step (metres) between two adjacent tracked frames. A step
+# above this CUTS the trajectory in two; it does not condemn the episode.
+#
+# A relocalization teleport makes the trajectory wrong at one *transition*, not at either
+# frame — both poses are internally consistent, they just aren't consistent with each
+# other. The world frame cancels out of the relative trajectory the policy trains on, so
+# once the two sides are separate episodes the displacement between them costs nothing.
+# Both frames either side of the cut are kept.
+#
+# 0.08 sits in a real gap in the data: 93 of 97 episodes across three clean scenes peak at
+# 6.2 cm or below (p50 3.4, p95 5.9), and the next value up is 10.6 cm. It is a ceiling on
+# plausible hand speed, not a tuning knob — at the 30 Hz fed rate, 8 cm/frame is 2.4 m/s.
+#
+# Measured on the hand frame, not the camera's: that is what the policy consumes, and the
+# lever arm amplifies orientation glitches the camera position never sees — p_hand =
+# p_cam + R_cam·t with |t| = 0.2685 m, so an orientation flip alone moves the hand up to 54 cm.
+# Step 5 records the per-episode maximum as `max_pose_jump_m`; the exporter recomputes the
+# per-step distances, since only it needs to know *where* the jumps are.
+max_pose_jump_m: 0.08
+
+# --- Catalog prediction (quality.py: auto_unusable_reasons) ---
+
+# Minimum number of tracked frames for the episode to be able to yield anything at all.
+#
+# This is a NECESSARY condition, not a sufficient one: an episode with fewer tracked frames
+# than the exporter's length floor cannot contain a run that long, so the catalog can safely
+# predict it will contribute nothing. The converse does not follow — an episode can clear
+# this bar and still export nothing, if its tracked frames are scattered across runs that are
+# each too short. Only the exporter can tell, because only the exporter reads the pose array.
+#
+# Must stay <= MIN_SEGMENT_STEPS in export/dp/buffer.py (currently 90), or the catalog starts
+# condemning episodes that do in fact export. There is a test for exactly that.
+min_tracked_frames: 90
+
+# Counted over the post-chirp window — the end of the sync chirp to the end of the episode —
+# because that is the span the exporter actually ships. The idle prefix before the chirp is
+# where the localizer is still relocalizing, and judging an episode on footage that never
+# reaches the dataset costs real demos.
+#
+# Counted on the frames SLAM was actually *fed*, never on the full GoPro grid. Under
+# `localization_frame_stride: 2` the localizer never sees odd frames, so a whole-grid count
+# is ~half the episode even for a flawless run.
+#
+# Stores written before pzarr v4 have no post-chirp counts; quality.py falls back to the
+# whole-episode fed-frame count for those and says so in the reason string.
+
+# Episodes with OptiTrack poses available (eef.attrs['available_sources']) skip
+# the check above entirely — their pose source doesn't depend on SLAM.
+optitrack_always_usable: true
+
+# Advisory only: drives the "low" badge in the catalog UI. Does NOT make an
+# episode unusable. Kept separate so the warning threshold and the exclusion
+# threshold can move independently.
+low_tracking_ratio: 0.90

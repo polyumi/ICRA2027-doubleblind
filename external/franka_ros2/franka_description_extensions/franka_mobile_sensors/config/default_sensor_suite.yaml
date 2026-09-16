@@ -1,0 +1,42 @@
+# Default sensor configuration for Franka mobile robot
+name: "Default Sensor Suite"
+description: "Standard 4-camera - 2-lidar configuration for normal operations"
+
+cameras: 
+  - name: "camera_front"
+    namespace: "camera_front" 
+    usb_port: "2-1.1.1"
+    device_profile: "franka_mobile_d455"
+
+  - name: "camera_rear"
+    namespace: "camera_rear"
+    usb_port: "2-1.1.3"
+    device_profile: "franka_mobile_d455"
+    
+  - name: "camera_left"
+    namespace: "camera_left"
+    usb_port: "2-1.1.2"
+    device_profile: "franka_mobile_d455"
+    
+  - name: "camera_right"
+    namespace: "camera_right"
+    usb_port: "2-1.1.4"
+    device_profile: "franka_mobile_d455"
+    
+network:
+  host_ip: "172.16.16.50"
+  interface_ip: "0.0.0.0"
+  host_udp_port: 0
+
+lidars:
+  - name: "lidar_front"
+    namespace: "lidar_front"
+    frame_id: "lidar_front"
+    sensor_ip: "172.16.16.60"
+    device_profile: "sick_nanoscan3"
+    
+  - name: "lidar_rear"
+    namespace: "lidar_rear"
+    frame_id: "lidar_rear"
+    sensor_ip: "172.16.16.61"
+    device_profile: "sick_nanoscan3"

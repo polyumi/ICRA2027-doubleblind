@@ -1,0 +1,29 @@
+{
+    "name": "${localWorkspaceFolderBasename}",
+    "privileged": true,
+    "remoteUser": "user",
+    "dockerComposeFile": "../docker-compose.yml",
+    "service": "franka_ros2_jazzy",
+    "workspaceFolder": "/ros2_ws",
+    "initializeCommand": "echo \"USER_UID=$(id -u $USER)\nUSER_GID=$(id -g $USER)\nCONTAINER_NAME=$(basename $(pwd))_jazzy\" > .env",
+    "postCreateCommand": "ln -sfn src/.github /ros2_ws/.github",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-vscode.cpptools",
+                "xaver.clang-format",
+                "twxs.cmake",
+                "ms-iot.vscode-ros"
+            ],
+            "settings": {
+                "python.analysis.extraPaths": [
+                    "/opt/ros/jazzy/lib/python3.12/site-packages"
+                ],
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "terminal.integrated.profiles.linux": { "bash": { "path": "/bin/bash" } }
+            }
+        }
+    }
+}

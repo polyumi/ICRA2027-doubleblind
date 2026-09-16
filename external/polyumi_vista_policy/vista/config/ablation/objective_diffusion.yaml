@@ -1,0 +1,10 @@
+# @package _global_
+# MiTas ablation: DDPM epsilon prediction on the same AdaLN DiT head.
+policy:
+  objective_type: diffusion
+  n_inference_steps: 16
+  num_train_timesteps: 100
+  input_perturb: 0.1
+
+logging:
+  tags: ["${name}", "${task_name}", "${exp_name}", "ablation:objective_diffusion"]

@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="use_sim_time" default="false"
+       description="Use /clock instead of the system ROS clock"/>
+
+  <arg name="interface" default="can0"/>
+  <arg name="node_id" default="1"/>
+  <arg name="topic" default="/polyumi/target_gripper"/>
+  <arg name="joint_name" default="fr3_gripper_width"/>
+
+  <arg name="calibration_file"
+       default="$(env HOME)/.ros/faulhaber_gripper_limits.json"/>
+  <arg name="calibration_service"
+       default="/faulhaber_gripper/calibrate"/>
+
+  <arg name="first_speed_rpm" default="100"/>
+  <arg name="second_speed_rpm" default="10"/>
+  <arg name="current_limit_ma" default="300"/>
+  <arg name="stall_current_ma" default="220"/>
+  <arg name="max_open_travel" default="1000000"/>
+  <arg name="max_close_travel" default="2000000"/>
+  <arg name="homing_timeout" default="180"/>
+
+  <arg name="csp_current_limit_ma" default="400"/>
+  <arg name="csp_rate_hz" default="200"/>
+  <arg name="delay_compensation_ms" default="13.3"/>
+  <arg name="max_tracking_error_mm" default="0"/>
+  <arg name="max_command_speed_rpm" default="4000"/>
+
+  <arg name="joint_state_topic"
+       default="/faulhaber_gripper/joint_states"/>
+  <arg name="current_topic"
+       default="/faulhaber_gripper/motor_current_ma"/>
+  <arg name="waypoint_error_topic"
+       default="/faulhaber_gripper/waypoint_tracking_error_mm"/>
+  <arg name="max_width_mm"
+       default="81.2"
+       description="Calibrated fully-open gripper width in millimetres"/>
+
+  <node pkg="franka_gripper_control"
+        exec="faulhaber_trajectory_node"
+        name="faulhaber_gripper_trajectory"
+        output="screen"
+        args="--interface $(var interface)
+              --node-id $(var node_id)
+              --topic $(var topic)
+              --joint-name $(var joint_name)
+              --calibration-file $(var calibration_file)
+              --calibration-service $(var calibration_service)
+              --first-speed-rpm $(var first_speed_rpm)
+              --second-speed-rpm $(var second_speed_rpm)
+              --current-limit-ma $(var current_limit_ma)
+              --stall-current-ma $(var stall_current_ma)
+              --max-open-travel $(var max_open_travel)
+              --max-close-travel $(var max_close_travel)
+              --homing-timeout $(var homing_timeout)
+              --csp-current-limit-ma $(var csp_current_limit_ma)
+              --csp-rate-hz $(var csp_rate_hz)
+              --delay-compensation-ms $(var delay_compensation_ms)
+              --max-tracking-error-mm $(var max_tracking_error_mm)
+              --max-command-speed-rpm $(var max_command_speed_rpm)
+              --joint-state-topic $(var joint_state_topic)
+              --current-topic $(var current_topic)
+              --waypoint-error-topic $(var waypoint_error_topic)
+              --max-width-mm $(var max_width_mm)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+</launch>

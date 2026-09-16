@@ -1,0 +1,231 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 1000  # Hz
+
+    joint_position_example_controller:
+      type: franka_example_controllers/JointPositionExampleController
+
+    joint_velocity_example_controller:
+      type: franka_example_controllers/JointVelocityExampleController
+
+    joint_impedance_example_controller:
+      type: franka_example_controllers/JointImpedanceExampleController
+
+    mobile_fr3_duo_joint_impedance_example_controller:
+      type: franka_example_controllers/MobileFr3DuoJointImpedanceExampleController
+
+    fr3_duo_joint_impedance_example_controller:
+      type: franka_example_controllers/Fr3DuoJointImpedanceExampleController
+
+    gravity_compensation_example_controller:
+      type: franka_example_controllers/GravityCompensationExampleController
+
+    model_example_controller:
+      type: franka_example_controllers/ModelExampleController
+
+    cartesian_impedance_example_controller:
+      type: franka_example_controllers/CartesianImpedanceExampleController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    franka_robot_state_broadcaster:
+      type: franka_robot_state_broadcaster/FrankaRobotStateBroadcaster
+
+    swerve_ik_controller:
+      type: franka_mobile/SwerveIKController
+
+    swerve_drive_controller:
+      type: franka_mobile/SwerveDriveController
+
+    full_body_controller:
+      type: mobile_fr3_duo_trajectory_controller/MobileFR3DuoTrajectoryController
+
+    spine_joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+joint_position_example_controller:
+  ros__parameters:
+    gazebo: true
+
+joint_velocity_example_controller:
+  ros__parameters:
+    gazebo: true
+
+joint_impedance_example_controller:
+  ros__parameters:
+    robot_type: 'fr3'
+    k_gains:
+      - 24.0
+      - 24.0
+      - 24.0
+      - 24.0
+      - 10.0
+      - 6.0
+      - 2.0
+    d_gains:
+      - 2.0
+      - 2.0
+      - 2.0
+      - 1.0
+      - 1.0
+      - 1.0
+      - 0.5
+
+swerve_drive_controller:
+  ros__parameters:
+    command_interface_prefix: swerve_ik_controller/
+    state_interface_prefix: swerve_ik_controller/
+    wheel_1_link_name: argo_drive_front_link
+    wheel_2_link_name: argo_drive_rear_link
+
+    linear:
+      x:
+        has_velocity_limits    : true
+        max_velocity           : 0.50  # m/s
+        min_velocity           : -0.50 # m/s
+        has_acceleration_limits: true
+        max_acceleration       : 1.0  # m/s^2
+        min_acceleration       : -1.0 # m/s^2
+        has_jerk_limits        : false
+        max_jerk               : 10.0  # m/s^3
+        min_jerk               : -10.0  # m/s^3
+      y:
+        has_velocity_limits    : true
+        max_velocity           : 0.5  # m/s
+        min_velocity           : -0.5 # m/s
+        has_acceleration_limits: true
+        max_acceleration       : 1.0  # m/s^2
+        min_acceleration       : -1.0 # m/s^2
+        has_jerk_limits        : false
+        max_jerk               : 10.0  # m/s^3
+        min_jerk               : -10.0  # m/s^3
+    angular:
+      z:
+        has_velocity_limits    : true
+        max_velocity           : 1.7  # rad/s
+        has_acceleration_limits: true
+        max_acceleration       : 1.0  # rad/s^2
+        min_acceleration       : -1.0  # rad/s^2
+        has_jerk_limits        : false
+        max_jerk               : 10.0  # rad/s^3
+        min_jerk               : -10.0  # rad/s^3
+
+
+swerve_ik_controller:
+  ros__parameters:
+    prefix: "tmrv0_2_"
+    wheel_1_link_name: argo_drive_front_link
+    wheel_2_link_name: argo_drive_rear_link
+
+mobile_fr3_duo_joint_impedance_example_controller:
+  ros__parameters:
+    cartesian_velocity_interface_prefix: swerve_drive_controller/ # let's chain to the swerve_drive_controller !
+    robot_types: ['tmrv0_2', 'fr3v2', 'fr3v2']
+    robot_prefixes: ['', 'left', 'right']
+    k_gains:
+      - 24.0
+      - 24.0
+      - 24.0
+      - 24.0
+      - 10.0
+      - 6.0
+      - 2.0
+    d_gains:
+      - 2.0
+      - 2.0
+      - 2.0
+      - 1.0
+      - 1.0
+      - 1.0
+      - 0.5
+
+fr3_duo_joint_impedance_example_controller:
+  ros__parameters:
+      update_rate: 1000
+      robot_types: ['fr3v2', 'fr3v2']
+      arm_prefixes: ['left', 'right']
+      k_gains:
+        - 24.0
+        - 24.0
+        - 24.0
+        - 24.0
+        - 10.0
+        - 6.0
+        - 2.0
+      d_gains:
+        - 2.0
+        - 2.0
+        - 2.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 0.5
+
+full_body_controller:
+  ros__parameters:
+    update_rate: 1000
+    cartesian_velocity_interface_prefix: swerve_drive_controller/
+    joints:
+      - planar_x
+      - planar_y
+      - planar_theta
+      - left_fr3v2_joint1
+      - left_fr3v2_joint2
+      - left_fr3v2_joint3
+      - left_fr3v2_joint4
+      - left_fr3v2_joint5
+      - left_fr3v2_joint6
+      - left_fr3v2_joint7
+      - right_fr3v2_joint1
+      - right_fr3v2_joint2
+      - right_fr3v2_joint3
+      - right_fr3v2_joint4
+      - right_fr3v2_joint5
+      - right_fr3v2_joint6
+      - right_fr3v2_joint7
+    robot_types: ['tmrv0_2', 'fr3v2', 'fr3v2']
+    robot_prefixes: ['', 'left', 'right']
+    k_gains:
+      - 24.0
+      - 24.0
+      - 24.0
+      - 24.0
+      - 10.0
+      - 6.0
+      - 2.0
+    d_gains:
+      - 2.0
+      - 2.0
+      - 2.0
+      - 1.0
+      - 1.0
+      - 1.0
+      - 0.5
+
+cartesian_impedance_example_controller:
+  ros__parameters:
+    arm_id: fr3
+    translational_stiffness: 150.0
+    rotational_stiffness: 10.0
+    nullspace_stiffness: 20.0
+
+model_example_controller:
+  ros__parameters:
+    robot_type: 'fr3'
+    arm_prefix: ''
+
+# Holds the prismatic spine against gravity (enabled globally in Gazebo).
+# On activation the JointTrajectoryController commands and holds the joint's
+# current position, which is its initial height of 0.0 m (lower travel limit),
+# so the column does not jump or collapse on bring-up.
+# ToDo: Replace/remove after proper spine integration
+spine_joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - franka_spine_vertical_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity

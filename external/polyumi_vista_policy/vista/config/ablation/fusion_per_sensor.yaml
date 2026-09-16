@@ -1,0 +1,9 @@
+# @package _global_
+# MiTas ablation: independent TransformerEncoder per sensor (no cross-modal attn).
+# fusion_layers=2 param-matches joint's 8 layers when N=4 streams (full vta).
+policy:
+  fusion_mode: per_sensor
+  fusion_layers: 2
+
+logging:
+  tags: ["${name}", "${task_name}", "${exp_name}", "ablation:fusion_per_sensor"]

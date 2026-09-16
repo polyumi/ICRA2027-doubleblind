@@ -1,0 +1,108 @@
+defaults:
+  - task: vista_multimodal
+  - _self_
+
+name: train_polytouch
+_target_: vista.workspace.train_vista_workspace.TrainVistaWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: default
+
+n_action_steps: 8
+
+# PolyTouch-only: longer contiguous mic for AST Kaldi fbank (~2.1 s → pad to 1024).
+# Other train_* configs keep task default audio_obs_horizon=10.
+task:
+  audio_obs_horizon: 64
+
+policy:
+  _target_: vista.models.polytouch.PolyTouchPolicy
+  shape_meta: ${shape_meta}
+  n_obs_steps: ${task.n_obs_steps}
+  # Pretrained CLIP-B / T3-small / AST stay at 768; fusion+UNet sized near ~160M peers
+  # (pretrained backbones may push total higher — that is OK).
+  d_model: 768
+  fusion_dim: 384
+  n_blocks: 6
+  n_heads: 12
+  cond_dim: 512
+  # Low-dim proprio; keep much smaller than fused CLIP/T3/AST (cond_dim).
+  proprio_out_dim: 64
+  pretrained: true
+  clip_model_name: vit_base_patch16_clip_224.openai
+  # FoTa T3-small (384-d stem+trunk) from HF dataset; proj → d_model.
+  # https://huggingface.co/datasets/alanz-mit/FoundationTactile/tree/main/models/t3_small
+  # Sensor stem: svelte (PolyTouch finger optics ≈ GelSight Svelte).
+  t3_size: small
+  t3_sensor: svelte
+  t3_hf_repo: alanz-mit/FoundationTactile
+  t3_ckpt: null
+  t3_trunk_ckpt: null
+  audio_backend: ast
+  encoder_ckpt: null
+  num_train_timesteps: 100
+  num_inference_steps: 16
+  down_dims: [256, 512, 1024]
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 4
+  num_workers: 4
+  shuffle: true
+  pin_memory: true
+  persistent_workers: false
+
+val_dataloader:
+  batch_size: 4
+  num_workers: 4
+  shuffle: false
+  pin_memory: true
+  persistent_workers: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  encoder_lr: 3.0e-5
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+training:
+  device: cuda:0
+  seed: 42
+  debug: false
+  resume: false
+  lr_scheduler: cosine
+  lr_warmup_steps: 200
+  num_epochs: 120
+  gradient_accumulate_every: 1
+  use_ema: true
+  checkpoint_every: 10
+  val_every: 1
+
+logging:
+  project: ${oc.env:WANDB_PROJECT,vista}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+
+checkpoint:
+  topk:
+    monitor_key: val_loss
+    mode: min
+    k: 5
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt'
+  save_last_ckpt: true
+
+hydra:
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}

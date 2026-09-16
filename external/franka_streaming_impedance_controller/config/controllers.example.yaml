@@ -1,0 +1,88 @@
+# Example parameters for the streaming Cartesian impedance controller.
+#
+# The top-level key must be the CONTROLLER INSTANCE NAME you spawn it under, not the plugin type.
+# If it does not match, controller_manager loads none of this and the in-code defaults win
+# silently — which is the single easiest way to end up wondering why a gain change did nothing.
+#
+# There is deliberately no `type` key: the spawner only looks for one under the controller's own
+# key, so pass it with -t instead:
+#
+#   ros2 run controller_manager spawner cartesian_impedance_controller \
+#     -t franka_streaming_impedance_controller/CartesianImpedanceController \
+#     --param-file config/controllers.example.yaml --inactive
+#
+# Spawn INACTIVE. This claims the same <joint>/effort interfaces as your joint-trajectory
+# controller, so activating it means deactivating that one — which a spawner cannot do; that
+# takes a switch_controller call, with the arm stationary.
+
+cartesian_impedance_controller:
+  ros__parameters:
+    arm_id: fr3
+    base_frame: fr3_link0
+
+    # The control point. Any TF frame rigidly attached to the flange; the controller moves both
+    # the measured pose and the Jacobian onto it at activation via one TF lookup. The default
+    # below is franka's own tool frame, i.e. no offset from what the robot already reports —
+    # name your own frame here if the contact happens somewhere else (custom fingers, a tool).
+    tcp_frame: fr3_hand_tcp
+
+    # Node-relative by default, i.e. under the instance name above. Producers must publish to the
+    # RESOLVED name, so set an absolute topic here if that is easier to wire.
+    target_topic: ~/target_poses
+
+    # --- Impedance gains ---
+    # serl_franka_controllers' shipped defaults (Panda-tuned; retune the nullspace tier on an FR3).
+    #
+    # Commanded force is stiffness * clipped_error, so translational_clip IS the force ceiling:
+    # 2000 N/m * 0.01 m = 20 N. That pairing is the point — high stiffness tracks accurately while
+    # the clip keeps force bounded. A softer unbounded spring instead leans on the environment
+    # with everything the arm has whenever the commanded pose is unreachable.
+    #
+    # Raising translational_clip raises the force ceiling proportionally. It is the single knob to
+    # turn if the arm feels too weak against a surface — and see the collision note below, because
+    # these two move together.
+    translational_stiffness: 2000.0
+    translational_damping: 89.0       # ~critical for 2000 N/m: 2*sqrt(2000) = 89.4
+    rotational_stiffness: 150.0
+    rotational_damping: 7.0           # deliberately under-damped; rotation is normally run soft
+    translational_clip: 0.01          # metres -> 20 N ceiling at the stiffness above
+    rotational_clip: 0.05             # radians
+
+    # Off by default. Steady-state error under sustained load is what it would buy; turn it on
+    # only after you have actually seen that, and note the integral accumulates (clamped) even at
+    # zero gain, so it takes effect immediately when raised mid-run.
+    translational_ki: 0.0
+    rotational_ki: 0.0
+
+    # Resolves the 7th DOF. Joint 1 gets its own much stiffer tier so the base rotation is pinned
+    # while the elbow floats. The projector uses a DAMPED pseudo-inverse, so a few percent of this
+    # torque does reach the end effector — raising it far starts fighting your reference.
+    nullspace_stiffness: 0.2
+    joint1_nullspace_stiffness: 100.0
+
+    # Ceiling on how fast the equilibrium point may travel, and so on how far it can lead the arm.
+    # Leaving these unbounded is a valid choice; bounding them matters here because that lead sets
+    # contact force alongside the clip.
+    max_pos_speed: 1.0                # m/s
+    max_rot_speed: 3.14               # rad/s
+
+    # --- Collision reflex thresholds ---
+    # Applied by the controller at on_configure; configure FAILS if they do not take, because a
+    # torque controller running against unknown reflex thresholds is invisible until it faults.
+    #
+    # NOT an independent choice from the gains above. The clip caps *commanded* force, but the
+    # reflex fires on *estimated external* force, which includes whatever the environment (or a
+    # hand) pushes back with. Raise the clip and these have to follow, or the arm reflexes exactly
+    # when it starts doing useful work.
+    #
+    # These are franka_example_controllers' DefaultRobotBehavior — what every franka example
+    # applies. The robot's factory defaults are LOWER, low enough that a bare hand push can trip
+    # `cartesian_reflex`. Deliberate-contact tasks may need the force numbers higher still; raise
+    # upper_force first, and only as far as the task actually needs.
+    #
+    # Torques are per joint (7); forces are (x, y, z, R, P, Y) in N and Nm.
+    collision:
+      lower_torque_thresholds: [25.0, 25.0, 22.0, 20.0, 19.0, 17.0, 14.0]
+      upper_torque_thresholds: [35.0, 35.0, 32.0, 30.0, 29.0, 27.0, 24.0]
+      lower_force_thresholds: [30.0, 30.0, 30.0, 25.0, 25.0, 25.0]
+      upper_force_thresholds: [40.0, 40.0, 40.0, 35.0, 35.0, 35.0]

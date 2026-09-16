@@ -1,0 +1,7 @@
+# @package _global_
+# Vision-tactile ablation: GoPro + finger cam + proprio.
+policy:
+  sensor_group: vt
+
+logging:
+  tags: ["${name}", "${task_name}", "${exp_name}", "ablation:vt"]

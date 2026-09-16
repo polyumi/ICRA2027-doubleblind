@@ -1,0 +1,87 @@
+# Slip-control BASELINE -- vision + tactile (finger camera, no audio).
+#
+# Gripper-only and RELATIVE, exactly like task/polyumi_gripper_only_delta.yaml (the slip
+# controller): the model predicts the CHANGE in gripper width and nothing else. These
+# three configs differ from it, and from each other, ONLY in which observation streams
+# are present -- that is the whole point of the ablation.
+#
+# Having no `*_eef_pos` key is load-bearing, as in the slip config: SequenceSampler then
+# builds the action from gripper_width alone, and UmiDataset's num_robot is 0, so the
+# pose-relative machinery and per-robot action split are skipped.
+#
+# Intended dataset: slip_polyumi_224.zarr.zip -- every stream already 224x224.
+name: polyumi_slip_vt
+
+camera_obs_latency: 0.125
+gripper_obs_latency: 0.02
+dataset_frequeny: 0 #29.97
+obs_down_sample_steps: 3 # 29.97/3 ~= 10 Hz, matching the ROS control loop
+
+low_dim_obs_horizon: 2
+img_obs_horizon: 2
+
+shape_meta: &shape_meta
+  obs:
+    camera0_rgb:
+      # The scene camera -- what standard UMI diffusion sees, and the one stream every baseline
+      # here has. 224x224 in the *_224 exports, so no `resize` is needed.
+      shape: [3, 224, 224]
+      horizon: ${task.img_obs_horizon}
+      latency_steps: 0
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: rgb
+      ignore_by_policy: False
+    finger_rgb:
+      # The finger camera. 224x224 in the *_224 exports, matching camera0_rgb -- TimmObsEncoder
+      # requires every rgb key to resolve to one spatial shape, and here they already do.
+      shape: [3, 224, 224]
+      horizon: ${task.img_obs_horizon}
+      latency_steps: 0
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: rgb
+      ignore_by_policy: False
+    robot0_gripper_width:
+      # Both an input and the thing predicted. Over a 1.6 s chunk this is a weak predictor of
+      # itself -- copy-last-value scores R^2 = 0.075 on the slip corpus -- so there is no trivial
+      # identity shortcut, but score any result against that baseline rather than the loss alone.
+      shape: [1]
+      horizon: ${task.low_dim_obs_horizon}
+      latency_steps: 0
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: low_dim
+      ignore_by_policy: False
+  action:
+    # One number: the gripper width. No rotation_rep -- there is no rotation to represent, and the
+    # dataset's rotation transformer never runs because num_robot is 0.
+    shape: [1]
+    horizon: 16
+    latency_steps: 0
+    down_sample_steps: ${task.obs_down_sample_steps}
+
+task_name: &task_name polyumi_slip_vt
+# Bind-mounted into the container by the run wrapper; override with task.dataset_path=... .
+dataset_path: /data/dataset.zarr.zip
+
+env_runner:
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+
+dataset:
+  _target_: diffusion_policy.dataset.umi_dataset.UmiDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  cache_dir: null
+  pose_repr:
+    obs_pose_repr: relative
+    action_pose_repr: relative
+    # Predict the CHANGE in gripper width from the width observed at t_obs, not the width itself --
+    # the same representation the slip controller trains and serves under. UmiDataset subtracts the
+    # base in __getitem__ so the action normalizer is fitted on deltas; serve_policy reads this key
+    # out of the checkpoint and adds the base back, keeping the wire contract absolute. Score
+    # against "predict zero", not against the loss -- most steps barely move.
+    action_gripper_repr: relative
+  action_padding: False
+  temporally_independent_normalization: False
+  repeat_frame_prob: 0.0
+  max_duration: null
+  seed: 42
+  val_ratio: 0.05

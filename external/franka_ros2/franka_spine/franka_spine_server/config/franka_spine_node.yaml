@@ -1,0 +1,4 @@
+/**:
+  ros__parameters:
+    http_timeout: 3.0
+    feedback_rate: 10.0

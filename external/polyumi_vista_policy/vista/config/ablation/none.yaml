@@ -1,0 +1,2 @@
+# @package _global_
+# No sensor ablation overlay — use policy.sensor_group from the train config.

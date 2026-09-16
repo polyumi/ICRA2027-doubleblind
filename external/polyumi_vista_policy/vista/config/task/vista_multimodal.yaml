@@ -1,0 +1,100 @@
+# Multimodal Vista task: vision + finger camera + contact mic + proprio.
+# Vision/tactile/proprio: n_obs_history=2, ds=3 (~100 ms). Audio: 10 contiguous rows (~0.33 s).
+name: vista_multimodal
+
+camera_obs_latency: 0.125
+robot_obs_latency: 0.0001
+gripper_obs_latency: 0.02
+dataset_frequeny: 0
+obs_down_sample_steps: 3
+
+n_obs_history: 2
+# Alias for policies that still take n_obs_steps (vision/tactile/proprio length).
+n_obs_steps: ${task.n_obs_history}
+audio_obs_horizon: 10
+action_horizon: 16
+ignore_proprioception: False
+
+shape_meta: &shape_meta
+  obs:
+    camera0_rgb:
+      shape: [3, 224, 224]
+      horizon: ${task.n_obs_history}
+      latency_steps: 0
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: rgb
+      ignore_by_policy: False
+    finger_rgb:
+      shape: [3, 224, 224]
+      horizon: ${task.n_obs_history}
+      latency_steps: 0
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: rgb
+      ignore_by_policy: False
+    mic_0:
+      shape: [536]
+      horizon: ${task.audio_obs_horizon}
+      latency_steps: 0
+      down_sample_steps: 1
+      type: audio
+      ignore_by_policy: False
+    robot0_eef_pos:
+      shape: [3]
+      horizon: ${task.n_obs_history}
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'}
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+    robot0_eef_rot_axis_angle:
+      raw_shape: [3]
+      shape: [6]
+      horizon: ${task.n_obs_history}
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'}
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: low_dim
+      rotation_rep: rotation_6d
+      ignore_by_policy: ${task.ignore_proprioception}
+    robot0_gripper_width:
+      shape: [1]
+      horizon: ${task.n_obs_history}
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.gripper_obs_latency}) * ${task.dataset_frequeny}'}
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+    robot0_eef_rot_axis_angle_wrt_start:
+      raw_shape: [3]
+      shape: [6]
+      horizon: ${task.n_obs_history}
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'}
+      down_sample_steps: ${task.obs_down_sample_steps}
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+  action:
+    shape: [10]
+    horizon: ${task.action_horizon}
+    latency_steps: 0
+    down_sample_steps: ${task.obs_down_sample_steps}
+    rotation_rep: rotation_6d
+
+task_name: &task_name vista_multimodal
+dataset_path: /data/dataset.zarr.zip
+
+pose_repr: &pose_repr
+  obs_pose_repr: relative
+  action_pose_repr: relative
+
+env_runner:
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+
+dataset:
+  _target_: vista.data.vista_dataset.VistaDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  cache_dir: null
+  pose_repr: *pose_repr
+  action_padding: False
+  temporally_independent_normalization: False
+  repeat_frame_prob: 0.0
+  max_duration: null
+  seed: 42
+  val_ratio: 0.05

@@ -1,0 +1,24 @@
+.env
+.idea
+.vscode
+.devcontainer/devcontainer-lock.json
+*.pyc
+COLCON_IGNORE
+AMENT_IGNORE
+cmake-build-*/
+build/
+install/
+log/
+libfranka
+franka_description
+
+#Third party packages
+gz_ros2_control/
+/ros2_control/
+olvx_descriptions_module
+ros2_robotiq_gripper
+zed_description
+serial
+activity.log
+task.md
+test-status.md

@@ -1,0 +1,25 @@
+# Keep the build context small and reproducible. Data and outputs are bind-mounted at run time,
+# never baked into the image.
+.git
+.gitignore
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Datasets / replay buffers (bind-mounted read-only instead)
+data/
+**/*.zarr
+**/*.zarr.zip
+**/*.zarr.mdb
+
+# Training outputs / checkpoints (bind-mounted read-write instead)
+**/outputs/
+**/checkpoints/
+**/wandb/
+*.ckpt
+
+# Local dev cruft
+.venv/
+.vscode/
+.idea/
+*.egg-info/

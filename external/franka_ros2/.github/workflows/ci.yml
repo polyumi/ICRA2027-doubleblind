@@ -1,0 +1,68 @@
+name: CI
+on:
+  push:
+    branches: [ jazzy, develop ]
+  pull_request:
+    branches: [ jazzy, develop ]
+jobs:
+  CI:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare
+        run: |
+          mkdir -p ${{github.workspace}}/src
+
+      - uses: actions/checkout@v2
+        with:
+          path: src
+
+      - name: VCS Import Dependencies
+        working-directory: src
+        run: |
+          sudo pip install vcstool
+          vcs import < dependency.repos --recursive
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v2
+        with:
+          tags: franka_ros2:jazzy
+          file: Dockerfile
+          push: false
+
+      - name: Build
+        uses: addnab/docker-run-action@v3
+        with:
+          image: franka_ros2:jazzy
+          options: -v ${{github.workspace}}/:/ros/
+          run: |
+            cd /ros
+            . /opt/ros/jazzy/setup.sh
+            colcon build --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCHECK_TIDY=ON -DBUILD_TESTING=ON -DBUILD_TESTS=OFF
+
+      - name: Test
+        uses: addnab/docker-run-action@v3
+        with:
+          image: franka_ros2:jazzy
+          options: -v ${{github.workspace}}/:/ros/
+          run: |
+            cd /ros
+            . /opt/ros/jazzy/setup.sh
+            . install/setup.sh
+            colcon test \
+              --packages-select-regex '^franka_(?!bringup$|gripper$)' \
+              --event-handlers console_direct+ \
+              --ctest-args --exclude-regex test_hardware
+            colcon test-result --verbose
+
+      - name: Upload Tests to Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: build/*/test_results/*/*.xml
+
+      - name: Publish Unit Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v1
+        if: always()
+        with:
+          files: build/*/test_results/*/*.xml

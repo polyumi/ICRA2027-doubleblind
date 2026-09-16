@@ -1,0 +1,48 @@
+# Mac (Apple Silicon) dev env for polyumi_vista_policy.
+#
+# Matches the cluster/Docker umi env on library versions (pytorch 2.1, timm 0.9.7, …) but
+# without pytorch-cuda or Linux-only sim/teleop deps. Use for dataset loading, forward passes,
+# and training-pipeline smoke tests on the laptop; full GPU training stays on the cluster via
+# conda_environment.yaml + Docker.
+#
+#   conda env create -f conda_environment_mac_dev.yaml
+#   conda activate vista-dev
+#   export PYTHONPATH="$(pwd)"
+name: vista-dev
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.9
+  - pip=22.1
+  - pytorch=2.1.0
+  - torchvision=0.16.0
+  - numpy=1.24
+  - scipy=1.11
+  - numba=0.57
+  - pandas=2.1
+  - py-opencv=4.7
+  - pyyaml=6.0
+  - tqdm=4.65
+  - zarr=2.16
+  - numcodecs=0.11
+  - hydra-core=1.2.0
+  - wandb=0.15.8
+  - dill=0.3.7
+  - einops=0.6.1
+  - diffusers=0.18.2
+  - llvm-openmp=14
+  - timm=0.9.7
+  - cython=0.29
+  - accelerate=0.24
+  - safetensors=0.4.2
+  - huggingface_hub=0.19.4
+  - torchaudio=2.1.0
+  - transformers=4.36.2
+  - pytest
+  - pip:
+    - threadpoolctl==3.2
+    - fastcrc==0.2
+    - imagecodecs==2023.9.18
+    - fastapi>=0.115
+    - uvicorn[standard]>=0.32

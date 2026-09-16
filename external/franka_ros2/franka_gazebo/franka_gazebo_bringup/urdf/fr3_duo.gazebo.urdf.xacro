@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<!-- Copyright (c) 2026 Franka Robotics GmbH
+     Licensed under the Apache License, Version 2.0 (the "License");
+     you may not use this file except in compliance with the License.
+     You may obtain a copy of the License at
+         http://www.apache.org/licenses/LICENSE-2.0 -->
+
+<!--
+  Gazebo entry point for the FR3 Duo v0.2 (without sensors).
+
+  Includes the description entry point for the base robot and adds the Gazebo overlay
+  (transmissions, ros2_control, gz_ros2_control system) as siblings.
+-->
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro"
+       name="fr3_duo_gazebo">
+
+  <!-- Gazebo-specific overrides of the description's shared args. Declared before the
+       description entry point is included so they win over its defaults: Gazebo attaches
+       the duo to the world frame and suppresses the self-collision capsule geometry. -->
+  <xacro:arg name="base_mount"                      default="world"/>
+  <xacro:arg name="include_self_collision_geometry" default="false"/>
+
+  <!-- Effort command interfaces for the Gazebo hardware plugin (Gazebo-only). -->
+  <xacro:arg name="gazebo_effort" default="false"/>
+
+  <!-- ================================================================ -->
+  <!-- Macro includes                                                    -->
+  <!-- ================================================================ -->
+  <!-- Base robot: declares the shared args, attaches to base_mount and calls the duo
+       macro with empty extras. -->
+  <xacro:include filename="$(find franka_description)/robots/fr3_duo/fr3_duo.urdf.xacro"/>
+  <!-- Unified ros2_control for gazebo (both arms in one block) + gazebo overlay macro -->
+  <xacro:include filename="$(find franka_gazebo_bringup)/urdf/fr3_duo.ros2_control.xacro"/>
+  <!-- Gazebo hardware-plugin block + gz_ros2_control system (owned by franka_gazebo_bringup) -->
+  <xacro:include filename="$(find franka_gazebo_bringup)/urdf/franka_gazebo_hardware_plugins.xacro"/>
+  <!-- Gazebo transmissions and SDF tag macros -->
+  <xacro:include filename="$(find franka_gazebo_bringup)/urdf/franka_gazebo_transmissions.xacro"/>
+
+  <!-- ================================================================ -->
+  <!-- World link definition                                            -->
+  <!-- ================================================================ -->
+  <link name="world"/>
+
+  <!-- ================================================================ -->
+  <!-- Gazebo overlay: transmissions + unified ros2_control + system     -->
+  <!-- ================================================================ -->
+  <xacro:fr3_duo_gazebo_composition>
+    <sensor_layer/>
+  </xacro:fr3_duo_gazebo_composition>
+
+</robot>

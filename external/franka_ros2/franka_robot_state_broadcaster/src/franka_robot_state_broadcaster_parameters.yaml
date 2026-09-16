@@ -1,0 +1,17 @@
+franka_robot_state_broadcaster:
+  robot_type: {
+    type: string,
+    default_value: "fr3",
+  }
+  arm_prefix: {
+    type: string,
+    default_value: "",
+  }
+  convenience_publish_rate: {
+    type: int,
+    default_value: 1000,
+    description: "Publish rate in Hz for convenience topics (current_pose, joint_states, etc.). Clamped to the controller's update rate, and rounded down to a whole divisor of it. The full robot state always publishes at the update rate.",
+    validation: {
+      gt_eq<>: [1],
+    }
+  }

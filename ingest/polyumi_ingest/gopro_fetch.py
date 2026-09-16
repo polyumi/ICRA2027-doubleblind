@@ -1,0 +1,261 @@
+"""
+ingest/gopro_fetch.py - Find GoPro MP4 files on SD card matching a session timestamp.
+
+GoPro cameras embed a UTC creation_time tag in the MP4 container that records the exact
+moment the shutter was pressed. We prefer this over filesystem mtime, which is stored in
+local time on FAT32 and subject to timezone misinterpretation when read on Linux.
+
+Fallback: if the tag is absent, infer start time as mtime - duration.
+"""
+
+import datetime
+import json
+import logging
+import pathlib
+import subprocess
+
+log = logging.getLogger(__name__)
+
+#: Conventional first video folder a GoPro creates. Used by tests to build a fixture card;
+#: production code must never hardcode this alone -- see ``_gopro_video_dirs`` for why.
+GOPRO_VIDEO_SUBDIR = pathlib.Path('DCIM') / '100GOPRO'
+DEFAULT_THRESHOLD_MS = 1000.0
+
+_MOUNT_ROOTS = [
+    pathlib.Path('/media'),
+    pathlib.Path('/run/media'),
+    pathlib.Path('/mnt'),
+]
+
+#: Memoized recording start times, keyed by (path, mtime_ns, size).
+#:
+#: ``find_gopro_video`` probes every MP4 on the card and runs once per session, so a fetch of
+#: N sessions against a card of M clips costs N*M ffprobes for M distinct answers. Each probe
+#: is ~100 ms of ffprobe *process startup*, not I/O — `ffprobe -version`, which opens no file,
+#: costs the same — so calling it fewer times is the only lever there is.
+#:
+#: Keyed on stat rather than path alone so swapping cards mid-run cannot serve a stale answer
+#: for a filename the new card happens to reuse — GoPro numbering restarts per card.
+_START_TIME_CACHE: dict[tuple[str, int, int], datetime.datetime] = {}
+
+
+def _mount_unmounted_sd_cards() -> None:
+    """Attempt to mount unmounted removable FAT/exFAT partitions via udisksctl."""
+    log.info('Checking for unmounted removable FAT/exFAT partitions to mount...')
+    try:
+        result = subprocess.run(
+            ['lsblk', '--json', '-o', 'NAME,MOUNTPOINT,FSTYPE,TYPE,RM'],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+
+    try:
+        blockdevices = json.loads(result.stdout).get('blockdevices', [])
+    except (json.JSONDecodeError, AttributeError):
+        return
+
+    def _unmounted_partitions(devs: list) -> list[str]:
+        found = []
+        for dev in devs:
+            dev_name = dev.get('name')
+            if (
+                dev_name
+                and dev.get('type') == 'part'
+                and dev.get('fstype') in ('vfat', 'exfat')
+                and not dev.get('mountpoint')
+                and (dev.get('rm') in (True, 1, '1') or dev_name.startswith('mmcblk'))
+            ):
+                found.append(f'/dev/{dev_name}')
+            found.extend(_unmounted_partitions(dev.get('children') or []))
+        return found
+
+    for dev_path in _unmounted_partitions(blockdevices):
+        log.info(f'Attempting to mount {dev_path}')
+        try:
+            subprocess.run(
+                ['udisksctl', 'mount', '-b', dev_path],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            log.info(f'Mounted {dev_path}')
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            log.debug(f'Could not mount {dev_path}: {exc}')
+
+
+def _gopro_video_dirs(mount_point: pathlib.Path) -> list[pathlib.Path]:
+    """
+    Every ``DCIM/*GOPRO`` folder on the card, sorted.
+
+    The camera does not keep writing into ``100GOPRO`` forever: once a folder fills up (file
+    count or size limit) it rolls over to ``101GOPRO``, then ``102GOPRO``, and so on. A fetch
+    that only ever looks in ``100GOPRO`` finds every clip up to the first rollover and then,
+    silently, none of the clips after it -- every later session fails to match at all, with a
+    delta of however long ago ``100GOPRO`` stopped being written to, and re-running changes
+    nothing because the file it should have matched was never in the scanned directory. Glob
+    for every ``*GOPRO`` folder instead of hardcoding the first one so a rollover is invisible
+    to the caller.
+    """
+    dcim = mount_point / 'DCIM'
+    if not dcim.is_dir():
+        return []
+    return sorted(p for p in dcim.iterdir() if p.is_dir() and p.name.upper().endswith('GOPRO'))
+
+
+def find_gopro_mount(auto_mount: bool = True) -> pathlib.Path | None:
+    """Scan common Linux auto-mount roots for a volume containing DCIM/<N>GOPRO."""
+    if auto_mount:
+        _mount_unmounted_sd_cards()
+    for root in _MOUNT_ROOTS:
+        if not root.is_dir():
+            continue
+        try:
+            children = list(root.iterdir())
+        except (PermissionError, OSError):
+            continue
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+                # Direct mount (e.g. /mnt/gopro) or one level deeper (/media/<user>/<label>)
+                if _gopro_video_dirs(child):
+                    return child
+                for grandchild in child.iterdir():
+                    if grandchild.is_dir() and _gopro_video_dirs(grandchild):
+                        return grandchild
+            except (PermissionError, OSError):
+                continue
+    return None
+
+
+def _recording_start_time(video_path: pathlib.Path) -> datetime.datetime:
+    """
+    Return the UTC recording start time for a GoPro MP4, memoized per file.
+
+    See ``_START_TIME_CACHE`` for why the memo matters. Failures are deliberately not
+    cached: they are rare, re-probing one unreadable clip is cheap next to the whole scan,
+    and caching an exception would need the raise site to reconstruct it.
+    """
+    stat = video_path.stat()
+    key = (str(video_path), stat.st_mtime_ns, stat.st_size)
+    if key not in _START_TIME_CACHE:
+        _START_TIME_CACHE[key] = _probe_start_time(video_path)
+    return _START_TIME_CACHE[key]
+
+
+def _probe_start_time(video_path: pathlib.Path) -> datetime.datetime:
+    """
+    Read the UTC recording start time for a GoPro MP4 by shelling out to ffprobe.
+
+    Prefers the creation_time tag embedded in the MP4 container (written by the GoPro
+    at the moment of shutter press, in UTC). Falls back to filesystem mtime minus
+    duration if the tag is absent.
+    """
+    result = subprocess.run(
+        ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', str(video_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    fmt = json.loads(result.stdout)['format']
+
+    ct_str = fmt.get('tags', {}).get('creation_time')
+    if ct_str:
+        return datetime.datetime.fromisoformat(ct_str.replace('Z', '+00:00'))
+
+    # FAT32 mtime is in local time but Linux reads it without timezone correction,
+    # so this path may be off by the GoPro's UTC offset. Use only as a last resort.
+    log.warning(f'{video_path.name}: no creation_time tag; falling back to mtime - duration')
+    duration_s = float(fmt['duration'])
+    mtime = datetime.datetime.fromtimestamp(video_path.stat().st_mtime, tz=datetime.timezone.utc)
+    return mtime - datetime.timedelta(seconds=duration_s)
+
+
+def find_gopro_video(
+    start_time: datetime.datetime,
+    mount_point: pathlib.Path | None = None,
+    threshold_ms: float = DEFAULT_THRESHOLD_MS,
+    auto_mount: bool = True,
+) -> pathlib.Path:
+    """
+    Find the GoPro MP4 whose recording start best matches *start_time*.
+
+    Args:
+        start_time: Nominal recording start time (gopro_sync_time from session metadata).
+            Timezone-naive values are treated as local time.
+        mount_point: SD card mount point. When None, scanned automatically from
+            common Linux auto-mount roots (/media, /run/media, /mnt).
+        threshold_ms: Maximum allowed difference in milliseconds between the
+            file's recording start and *start_time*. Raises RuntimeError if the
+            best match exceeds this.
+        auto_mount: When True (default), attempt to mount any unmounted removable
+            FAT/exFAT partitions via udisksctl before scanning.
+
+    Returns:
+        Path to the best-matching MP4 file on the SD card.
+
+    Raises:
+        FileNotFoundError: SD card not found, or it has no DCIM/<N>GOPRO folder at all.
+        RuntimeError: No file within *threshold_ms* of *start_time*.
+
+    """
+    if mount_point is None:
+        mount_point = find_gopro_mount(auto_mount=auto_mount)
+        if mount_point is None:
+            raise FileNotFoundError(
+                'No GoPro SD card found under /media, /run/media, or /mnt.\n'
+                "Are you sure you've both inserted AND mounted the SD card? "
+                'You can also pass --mount-point explicitly if it is mounted elsewhere.'
+            )
+        log.info(f'Auto-detected GoPro SD card at {mount_point}')
+
+    # Every DCIM/<N>GOPRO folder, not just the first: the camera rolls over to a new one once
+    # the current folder fills up, so a card mid-collection routinely has more than one.
+    video_dirs = _gopro_video_dirs(mount_point)
+    if not video_dirs:
+        raise FileNotFoundError(f'No DCIM/<N>GOPRO folder found under {mount_point}')
+
+    mp4_files = [
+        f for video_dir in video_dirs for f in sorted(video_dir.glob('*.MP4')) + sorted(video_dir.glob('*.mp4'))
+    ]
+    if not mp4_files:
+        raise FileNotFoundError(f'No MP4 files found in {", ".join(str(d) for d in video_dirs)}')
+
+    if start_time.tzinfo is None:
+        start_time = start_time.astimezone(datetime.timezone.utc)
+    else:
+        start_time = start_time.astimezone(datetime.timezone.utc)
+
+    best_path: pathlib.Path | None = None
+    best_delta_ms = float('inf')
+
+    for mp4 in mp4_files:
+        try:
+            recording_start = _recording_start_time(mp4)
+        except (subprocess.CalledProcessError, KeyError, ValueError) as exc:
+            log.warning(f'Skipping {mp4.name}: could not read start time ({exc})')
+            continue
+
+        delta_ms = abs((recording_start - start_time).total_seconds()) * 1000
+        log.debug(f'{mp4.name}: start={recording_start.isoformat()}, delta={delta_ms:.0f}ms')
+
+        if delta_ms < best_delta_ms:
+            best_delta_ms = delta_ms
+            best_path = mp4
+
+    if best_path is None:
+        raise RuntimeError('Could not determine recording start time for any MP4 on the SD card.')
+
+    if best_delta_ms > threshold_ms:
+        raise RuntimeError(
+            f'Best match {best_path.name} has delta {best_delta_ms:.0f}ms, '
+            f'which exceeds threshold {threshold_ms:.0f}ms. '
+            f'Check that the GoPro clock was synced before recording.'
+        )
+
+    log.info(f'Matched {best_path.name} to {start_time.isoformat()} (delta={best_delta_ms:.0f}ms)')
+    return best_path

@@ -1,0 +1,59 @@
+# PolyUMI's own ros2_control controllers, declared for the NUC's controller_manager.
+#
+# Loaded by the spawner in fr3_inference.launch.py. Kept out of franka_bringup's controllers.yaml
+# because that file belongs to the franka_ros2 submodule and would be clobbered on every update.
+#
+# The controller is spawned INACTIVE. It claims the same <joint>/effort command interfaces as
+# fr3_arm_controller, so exactly one of the two can run: activating this one deactivates MoveIt's
+# path to the arm. See docs/lab-fr3-inference.md.
+#
+# WHY EACH NUMBER IS WHAT IT IS lives upstream, in
+# external/franka_streaming_impedance_controller/config/controllers.example.yaml — the force
+# ceiling (stiffness x clip), why the nullspace is tiered, why the collision thresholds are not an
+# independent choice. This file is the deployment: it repeats the values so a gain change here is
+# a change to OUR robot rather than to the shared example, and comments only what differs.
+
+# There is deliberately no `type` here: the spawner only looks for one under the controller's own
+# key, so it is passed with -t instead. See fr3_bringup.launch.py.
+polyumi_cartesian_impedance_controller:
+  ros__parameters:
+    arm_id: fr3
+    base_frame: fr3_link0
+    # The policy's body frame. NOT fr3_hand_tcp, which is where franka reports O_T_EE — the
+    # controller moves both the measured pose and the Jacobian onto this frame using TF, so
+    # nuc/tcp_calib.py stays the one definition of the geometry.
+    tcp_frame: polyumi_tcp
+    # Absolute, not the controller's node-relative default: polyumi_ros2.target_chunk publishes
+    # here, and the probes and the policy client must all land on the same topic.
+    target_topic: /polyumi/target_poses_traj
+
+    # --- Impedance gains --- (serl_franka_controllers' defaults; retune the nullspace on the FR3)
+    translational_stiffness: 2000.0
+    translational_damping: 89.0       # ~critical for 2000 N/m: 2*sqrt(2000) = 89.4
+    rotational_stiffness: 150.0
+    rotational_damping: 7.0           # deliberately under-damped
+    translational_clip: 0.01          # metres -> 20 N ceiling at the stiffness above
+    rotational_clip: 0.05             # radians
+
+    # Off. Steady-state error under load is what it would buy, and we have not seen that yet.
+    translational_ki: 0.0
+    rotational_ki: 0.0
+
+    nullspace_stiffness: 0.2
+    joint1_nullspace_stiffness: 100.0
+
+    max_pos_speed: 1.0                # m/s
+    max_rot_speed: 3.14               # rad/s
+
+    # --- Collision reflex thresholds ---
+    # franka_example_controllers' DefaultRobotBehavior. The robot's factory defaults are lower,
+    # low enough that a bare hand push trips `cartesian_reflex`. Step 7's deliberate-contact test
+    # will likely need the force numbers higher still; raise upper_force first, and only as far as
+    # the task needs — and raise these whenever translational_clip goes up.
+    #
+    # Torques are per joint (7), forces are (x, y, z, R, P, Y) in N and Nm.
+    collision:
+      lower_torque_thresholds: [25.0, 25.0, 22.0, 20.0, 19.0, 17.0, 14.0]
+      upper_torque_thresholds: [35.0, 35.0, 32.0, 30.0, 29.0, 27.0, 24.0]
+      lower_force_thresholds: [30.0, 30.0, 30.0, 25.0, 25.0, 25.0]
+      upper_force_thresholds: [40.0, 40.0, 40.0, 35.0, 35.0, 35.0]

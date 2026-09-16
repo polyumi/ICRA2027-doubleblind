@@ -1,0 +1,942 @@
+"""
+Export a pzarr scene to a UMI-format ReplayBuffer (``.zarr.zip``).
+
+The layout matches ``universal_manipulation_interface``'s ``ReplayBuffer`` so that
+``UmiDataset`` reads it directly — the key *names* are load-bearing (the sampler counts
+robots via ``key.endswith('eef_pos')``, picks Slerp vs linear interp via ``'rot' in key``,
+and ``get_normalizer`` raises on any low-dim key it can't name-match)::
+
+    <output>.zarr.zip
+      meta/episode_ends                 (n_episodes,) int64, cumulative step counts
+      data/camera0_rgb                  (T,224,224,3) uint8  Blosc(zstd), chunks (1,224,224,3)
+      data/robot0_eef_pos               (T,3)  float32  hand-frame position
+      data/robot0_eef_rot_axis_angle    (T,3)  float32  hand-frame rotation as a rotvec
+      data/robot0_gripper_width         (T,1)  float32  metres of opening from fully closed
+      data/robot0_demo_start_pose       (T,6)  float32  episode's first [pos, rotvec], repeated
+      data/robot0_demo_end_pose         (T,6)  float32  episode's last  [pos, rotvec], repeated
+
+Deliberately absent:
+
+* ``action`` — ``sampler.py`` synthesises it from
+  ``[eef_pos, eef_rot_axis_angle, gripper_width]`` when the key is missing, so writing it
+  would be redundant (and would have to be kept in lock-step with the obs keys).
+* ``robot0_eef_rot_axis_angle_wrt_start`` — ``UmiDataset`` derives it at load time from
+  ``demo_start_pose``. It is in ``shape_meta`` but must *not* be in the store.
+* tactile (piezo / finger camera) — out of scope for the *visuomotor* policy. The contact
+  mic is exported by ``--type polyumi``, which runs this same code with a modality attached;
+  see ``export.dp.modality`` and ``export.dp.polyumi``.
+
+Poses come from one of each episode's ``eef/pose_<source>`` arrays (preprocessing step 5 writes
+one per available source — ``optitrack`` and/or ``slam``), already on the canonical **hand**
+body frame and on the GoPro frame grid. Step 5 no longer picks a single winner; *this* exporter
+does, per episode: an episode's ``eef.attrs['default_source']`` (OptiTrack if present, else
+SLAM) unless overridden by ``scene.json``'s ``pose_source_overrides`` (keyed by session
+directory name, same pattern as ``unusable_episodes``) — see ``resolve_pose_source``. Changing
+the source is therefore a re-*export*, not a re-preprocess. Quaternion → rotvec is the only pose
+transform here. The world frame is left as-is: it cancels out of the relative trajectory the
+policy trains on, whereas the body frame does not — which is why step 5 exists. See
+``EefPoseStep`` and ``transforms.retarget_body_frame``.
+
+Each exported episode's resolved source is recorded as **provenance**: alongside the returned
+episode count, ``export_scenes_to_dp``/``export_scene_to_dp`` return a list of per-episode
+provenance dicts (scene, session, episode, source, world_frame, n_steps, segment, frame_range,
+frame_stride), which callers can persist externally (see ``main.py``'s ``<output>.provenance.json`` sidecar and the
+catalog's ``DatasetManifest``). The same information is also written into the ``.zarr.zip``
+itself, as ``meta.attrs['pose_provenance']`` (the full list) and ``meta.attrs['episode_pose_source']``
+(just the per-episode source strings, aligned with ``episode_ends``) — ``UmiDataset`` only ever
+reads ``meta/episode_ends``, so these extra attrs are inert cargo it ignores.
+
+Steps are the frames SLAM was **fed** — every ``localization_frame_stride``-th GoPro frame, so
+~30 Hz at the current stride of 2, not the 59.94 Hz the camera records at. Poses exist only on
+that grid (nothing is interpolated), and Δt stays uniform, which is all UMI's dataset requires;
+it sets the observation rate from there via ``obs_down_sample_steps`` in the task config. That
+knob and this stride are coupled: halving the stored rate must halve ``obs_down_sample_steps``
+or the policy trains on a different Δt than it runs at.
+
+One session can produce **several episodes**. The session is cut wherever the trajectory stops
+being trustworthy — the pose source has no pose (SLAM lost tracking), the gripper width is
+missing, a modality stops covering the span, or the hand position steps further between two
+adjacent frames than ``max_pose_jump_m`` (a relocalization teleport) — and each contiguous run
+either side is exported as its own episode. Runs shorter than ``MIN_SEGMENT_STEPS`` are dropped.
+Bridging a gap would put a step of the wrong duration inside an episode, which the fixed-rate
+sampler cannot see; splitting keeps every episode honest. This follows the upstream UMI repo's
+``scripts_slam_pipeline/06_generate_dataset_plan.py``. Each segment's provenance records
+``cut_start``/``cut_end`` saying which of those causes bounded it.
+
+**Cutting, not condemning.** There is no automatic whole-episode veto here: a session with holes
+or a teleport is segmented around them rather than discarded, and the only thing that drops a
+whole session is the human ``unusable_episodes`` set in ``scene.json``.
+``polyumi_ingest.quality`` predicts, for the catalog alone, which episodes are too short to
+yield anything — see that module's docstring for the one-way relationship between the two.
+``pingest export --dry-run`` previews the whole plan without decoding a frame.
+
+Images use **Blosc**, not JpegXl, on purpose. The training container pins Python 3.9 with
+``imagecodecs==2023.9.18``, whose JpegXl codec cannot parse the config that our Python-3.13
+``imagecodecs`` (2026.x) writes (``bitspersample``, ``squeeze``, ``usecontainer``, …), and no
+single ``imagecodecs`` release supports both interpreters. Blosc is in ``numcodecs`` core, so
+its config is byte-identical across both stacks; it is lossless, decodes faster than JpegXl,
+and only costs disk.
+
+GoPro frames are decoded on demand from each episode's ``gopro.mp4`` sidecar (via
+``video_helpers.open_gopro_frames``) — the pzarr no longer stores a ``gopro/frames`` array.
+The resize onto the 224x224 ``camera0_rgb`` grid goes through the shared
+``camera_preproc.resize_camera0_rgb`` contract so it stays identical to what the inference
+node feeds the policy.
+
+The store is written ``zarr_format=2`` so the (v2-pinned) UMI zarr can read it, then packed
+into a ``.zarr.zip`` because ``UmiDataset`` opens its dataset through ``zarr.ZipStore``.
+
+**Extra observation streams** ride along as ``modalities`` (``export.dp.modality``), which
+contribute additional ``data/<key>`` arrays inside the same segment loop, and may narrow the
+validity mask where they have no observation — so a stream that stops before the others is
+trimmed around like a pose dropout rather than failing the episode. With zero modalities
+attached, this function's output — data keys, provenance sidecar, meta attrs — *is* the default
+``--type dp`` contract; ``--type polyumi`` only ever adds to that output, never changes it.
+
+``enforce_preprocessing`` requires only the steps an export actually reads —
+``PreprocessingStep.required_for_export``, plus whatever its modalities declare. Demanding
+every registered step instead would mean each new step stranded the entire existing corpus
+until it was re-run, for an export that never looks at its output.
+"""
+
+from __future__ import annotations
+
+import logging
+import pathlib
+import tempfile
+import zipfile
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
+
+import numpy as np
+import zarr
+from numcodecs import Blosc
+from scipy.spatial.transform import Rotation
+
+from polyumi_ingest import quality
+from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
+from polyumi_ingest.config import load_closed_width_m, load_open_width_m
+from polyumi_ingest.export.dp.modality import ExportModality
+from polyumi_ingest.manifests import SceneManifest
+from polyumi_ingest.preproc import available_preprocessing_steps, preprocessing_steps_done
+from polyumi_ingest.pzarr.scene_files import SceneFiles
+from polyumi_ingest.pzarr.store import arr, grp
+from polyumi_ingest.video_helpers import GoproMp4Frames, open_gopro_frames
+
+log = logging.getLogger('export.dp')
+
+#: Output image resolution, matching UMI's ``camera0_rgb`` shape ``[3, 224, 224]``.
+RESOLUTION = CAMERA0_RGB_RESOLUTION
+#: Single robot arm; UMI's multi-robot keying still applies with one ``robot0``.
+_ROBOT = 'robot0'
+_CAMERA = 'camera0_rgb'
+
+_BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
+_TIME_CHUNK = 1024
+
+#: Warn if the largest inter-frame gap in the exported span exceeds this multiple of the
+#: median frame period. Frames are stored as-is (no resampling), so a dropped frame becomes a
+#: single step that silently violates UMI's uniform-Δt assumption. One is tolerable; many
+#: suggests a recording problem.
+_GAP_WARN_FACTOR = 5.0
+
+#: Shortest run of valid steps worth emitting as its own episode.
+#:
+#: The hard floor is the training sampler's, not ours: with ``action_padding: False``, UMI's
+#: ``SequenceSampler`` keeps an index only while
+#: ``end_idx >= current_idx + (action_horizon - 1) * obs_down_sample_steps + 1``, which at the
+#: fork's ``action_horizon: 16`` / ``obs_down_sample_steps: 3`` is **46 stored steps**. An
+#: episode shorter than that yields *zero* training samples — it is decoded, compressed and
+#: stored for nothing. (Note the 46 is in stored rows, ~30 Hz: the ``* 3`` is already the
+#: 10 Hz-policy-to-30 Hz-buffer conversion, so it is ~1.5 s, not 4.6 s.)
+#:
+#: 90 rather than 46 because 46 is a cliff edge — a 46-step segment yields exactly one sample.
+#: Measured over 148 sessions, 90 is the shortest round floor at which no surviving segment
+#: contributes fewer than five samples, and it costs ~4% of the total against the bare minimum.
+#:
+#: Steps, not seconds, because that is the unit the sampler's own constraint is in. The cost is
+#: that the wall-clock meaning tracks ``localization_frame_stride`` — 3.0 s at stride 2, 1.5 s
+#: at stride 1 — so ``EpisodePlan.min_seconds`` resolves it per episode for the logs. A buffer
+#: may not mix strides, so within one dataset this always has one meaning.
+MIN_SEGMENT_STEPS = 90
+
+
+#: Median-filter window, in GoPro frames, applied to the ArUco gripper width before it becomes
+#: a training label. 5 frames is 83 ms at 60 Hz — long enough to remove the isolated misreads
+#: (residual std 0.4 mm, worst 8.8 mm, measured over 75 episodes) and short enough to cost only
+#: ~2% of the 6.4 mm median travel a grasp actually uses.
+#:
+#: The label needs this and the robot's own signal does not: training reads ArUco tag separation
+#: at 60 Hz, while at inference the policy is fed the gripper encoder over
+#: /fr3_gripper/joint_states. Unfiltered, ~6% of the label's range is noise that has no
+#: counterpart at deployment, so the policy spends capacity fitting a process it will never see.
+GRIPPER_MEDIAN_WINDOW = 5
+
+#: Consecutive over-stroke frames that mark an episode as tracking-runaway rather than
+#: scattered misreads. The four episodes that motivated this ran 78-140 frames (1.3-2.3 s
+#: at 60 Hz), every one of them ending on the episode's final frame; the median filter
+#: above cannot help a run this long, and no filter should try.
+GRIPPER_OVER_STROKE_RUN_FRAMES = 30
+
+
+def _median_filter_1d(x: np.ndarray, window: int) -> np.ndarray:
+    """
+    Median-filter ``x`` with edge padding.
+
+    Not ``scipy.signal.medfilt``, which zero-pads: an episode's first and last samples are real
+    gripper widths, and mixing zeros into their windows would pull the ends toward "closed" —
+    exactly the samples a policy's first and last actions depend on.
+    """
+    if window < 3 or len(x) < window:
+        return x
+    half = window // 2
+    padded = np.pad(x, (half, half), mode='edge')
+    return np.median(np.lib.stride_tricks.sliding_window_view(padded, window), axis=1)
+
+
+def _episode_frame_stride(ep: zarr.Group) -> int:
+    """
+    Return the frame decimation SLAM ran at, which is the grid poses exist on.
+
+    ``localization_frame_stride`` (step 2) feeds the localizer every Nth GoPro frame, so the
+    other frames have no pose at all. Defaults to 1 for stores predating the attr, where the
+    localizer saw every frame and the fed grid is the full grid.
+    """
+    if 'annotations/slam' not in ep:
+        return 1
+    return max(1, int(grp(ep, 'annotations/slam').attrs.get('frame_stride', 1)))
+
+
+def _measure_rate(gopro_ts: np.ndarray) -> float:
+    """Native frame rate (Hz) from the median inter-frame period of GoPro timestamps."""
+    if len(gopro_ts) < 2:
+        raise RuntimeError(f'Need at least 2 GoPro timestamps to measure rate, got {len(gopro_ts)}')
+    return 1.0 / float(np.median(np.diff(gopro_ts)))
+
+
+def _split_runs(valid: np.ndarray, break_after: np.ndarray | None = None) -> list[tuple[int, int]]:
+    """
+    Split a validity mask into contiguous runs, as inclusive ``[start, end]`` index pairs.
+
+    One episode per run: a demo whose pose source drops out in the middle is two usable
+    demonstrations either side of the hole, not one truncated one. This mirrors upstream UMI's
+    ``get_bool_segments`` in its ``scripts_slam_pipeline/06_generate_dataset_plan.py``.
+
+    Splitting rather than bridging is the whole point: UMI's fixed-rate sampler assumes uniform
+    Δt *within* an episode, which a gap would silently violate.
+
+    ``break_after[i]`` cuts between ``i`` and ``i+1`` while keeping **both** steps — for a
+    discontinuity that invalidates the *transition* rather than either endpoint, which is what a
+    pose jump is. Marking such a step invalid instead would throw away a good frame and put the
+    boundary one step off.
+    """
+    runs: list[tuple[int, int]] = []
+    n = len(valid)
+    i = 0
+    while i < n:
+        if not valid[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and valid[j + 1] and not (break_after is not None and break_after[j]):
+            j += 1
+        runs.append((i, j))
+        i = j + 1
+    return runs
+
+
+def _decode_resized_frames(frames_arr: GoproMp4Frames, gidx: np.ndarray) -> np.ndarray:
+    """Decode the selected GoPro frames and resize to (T,RES,RES,3) uint8 (channel-last)."""
+    # gidx is a contiguous ascending range, so decode sequentially — the mp4 reader is a
+    # forward-only single VideoCapture (not thread-safe), and H.264 decode is inherently
+    # sequential anyway. resize_camera0_rgb is the shared export/inference transform.
+    frames = [resize_camera0_rgb(np.asarray(frames_arr[int(i)])) for i in gidx]
+    return np.stack(frames, axis=0).astype(np.uint8)
+
+
+def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
+    """Append each array along axis 0, creating resizable v2 arrays on first use."""
+    for key, value in arrays.items():
+        value = np.asarray(value)
+        t = value.shape[0]
+        if key not in data_grp:
+            if value.ndim >= 3:
+                chunks = (1,) + value.shape[1:]
+            else:
+                chunks = (min(t, _TIME_CHUNK),) + value.shape[1:]
+            data_grp.zeros(
+                name=key,
+                shape=value.shape,
+                chunks=chunks,
+                dtype=value.dtype,
+                compressor=_BLOSC,
+                zarr_format=2,
+            )
+            arr(data_grp, key)[:] = value
+        else:
+            a = arr(data_grp, key)
+            old = a.shape[0]
+            a.resize((old + t,) + a.shape[1:])
+            a[old:] = value
+
+
+def resolve_pose_source(ep: zarr.Group, episode_key: str, override: str | None) -> str:
+    """
+    Resolve which pose source ``episode_key`` should export from.
+
+    ``override`` (from ``scene.json``'s ``pose_source_overrides``, keyed by session directory
+    name) wins when set; otherwise falls back to ``eef.attrs['default_source']`` (OptiTrack if
+    the episode has it, else SLAM — see ``EefPoseStep``). Raises if step 5 hasn't run at all, or
+    if the resolved source's array isn't one the episode actually has.
+    """
+    if 'eef' not in ep:
+        raise RuntimeError(f'{episode_key}: no eef group — run preprocessing step 5 (eef-pose) before exporting.')
+    eef_grp = grp(ep, 'eef')
+    available = list(eef_grp.attrs.get('available_sources', []))
+    if override is not None:
+        source = override
+        if source not in available:
+            raise RuntimeError(
+                f'{episode_key}: pose_source_overrides requests {source!r}, but this episode only '
+                f'has {available} (run `pingest pp 5 --force` if it should have more).'
+            )
+    else:
+        source = eef_grp.attrs.get('default_source')
+        if source is None or f'pose_{source}' not in eef_grp:
+            raise RuntimeError(
+                f'{episode_key}: eef has no default_source / eef/pose_{source} — '
+                f're-run preprocessing step 5 (eef-pose) before exporting.'
+            )
+    return source
+
+
+@dataclass(frozen=True)
+class EpisodePlan:
+    """
+    What an export would cut one session into — computed without decoding a single frame.
+
+    ``segments`` and ``dropped`` are inclusive ``[start, end]`` index pairs into ``steps``,
+    which itself holds GoPro-grid frame indices (the fed grid, after the chirp trim). ``cuts``
+    is one ``(cut_start, cut_end)`` reason pair per kept segment, aligned with ``segments``.
+    ``step_ts`` is the timestamp of each of those steps, so timings need no second array.
+
+    This is the plan alone. The pose and gripper arrays it was computed from are returned
+    beside it by :func:`plan_episode_segments`, for the export path that goes on to write them;
+    a dry run takes the plan and drops the rest. Nothing here touches ``gopro.mp4``, which is
+    what makes the preview cheap.
+    """
+
+    steps: np.ndarray
+    step_ts: np.ndarray
+    segments: list[tuple[int, int]]
+    cuts: list[tuple[str, str]]
+    dropped: list[tuple[int, int]]
+    stride: int
+    min_steps: int
+
+    def duration_s(self, segment: tuple[int, int]) -> float:
+        """Wall-clock span of one segment, first step to last."""
+        return float(self.step_ts[segment[1]] - self.step_ts[segment[0]])
+
+    @property
+    def min_seconds(self) -> float:
+        """
+        The length floor in wall-clock seconds for *this* episode's stride.
+
+        ``min_steps`` is stride-relative, so the same flag means 3.0 s at stride 2 and 1.5 s at
+        stride 1. Surfaced so an export states what its floor actually enforced.
+        """
+        if len(self.step_ts) < 2:
+            return 0.0
+        return float(self.min_steps * np.median(np.diff(self.step_ts)))
+
+    def segment_record(self, seg_i: int) -> dict:
+        """
+        Build the provenance record for one kept segment: what it covers, and why it ends there.
+
+        The single source of these fields. A real export merges the pose source and its
+        modalities on top; ``--dry-run`` prints them as they are. Two builders would drift, and
+        a preview that disagreed with the export would cost someone a training run.
+        """
+        s0, s1 = self.segments[seg_i]
+        gidx = self.steps[s0 : s1 + 1]
+        return {
+            'segment': seg_i,
+            'n_steps': len(gidx),
+            'frame_range': [int(gidx[0]), int(gidx[-1])],
+            'frame_stride': self.stride,
+            # Why this segment begins and ends where it does — 'episode_start'/'episode_end',
+            # 'chirp', 'pose_gap', 'gripper_gap', or a modality name. Readers must .get()
+            # these: buffers exported before cut attribution existed carry neither.
+            'cut_start': self.cuts[seg_i][0],
+            'cut_end': self.cuts[seg_i][1],
+            # Span of the exported steps, i.e. how much real time this episode contributes to
+            # the dataset. First-to-last, so it is one frame short of the time the steps cover.
+            'duration_s': self.duration_s((s0, s1)),
+        }
+
+
+def _cut_reason(i: int, masks: Sequence[tuple[str, np.ndarray]]) -> str:
+    """Name of the first mask that rejects step ``i`` — why a run stopped there."""
+    for name, mask in masks:
+        if not mask[i]:
+            return name
+    return 'unknown'
+
+
+def plan_episode_segments(
+    ep: zarr.Group,
+    episode_key: str,
+    pose_source: str,
+    closed_width_m: float,
+    open_width_m: float,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
+    thresholds: quality.QualityThresholds | None = None,
+) -> tuple[EpisodePlan, np.ndarray, np.ndarray]:
+    """
+    Decide how one session splits into exportable segments, decoding no frames.
+
+    Returns ``(plan, pose, gripper)`` — the plan, plus the two GoPro-grid arrays it was cut
+    from, so the export path that writes them need not read them a second time. ``--dry-run``
+    keeps the plan and drops the arrays.
+
+    Shared by the real export and by ``pingest export --dry-run``, so the preview cannot
+    disagree with what an export actually writes.
+
+    ``thresholds`` supplies the pose-jump cut distance (default: ``quality_thresholds.yaml``),
+    which stays policy read at export time rather than anything baked into the pzarr.
+    """
+    array_name = f'pose_{pose_source}'
+    if 'eef' not in ep or array_name not in grp(ep, 'eef'):
+        raise RuntimeError(
+            f'{episode_key}: no eef/{array_name} — run preprocessing step 5 (eef-pose) before exporting.'
+        )
+    gopro_ts = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
+    pose = np.asarray(arr(ep, f'eef/{array_name}')[:], dtype=np.float64)  # (N,7) [xyz, quat] hand frame
+    # Raw ArUco tag separation, converted here to opening-from-closed. The subtraction lives in
+    # the exporter rather than in step 4 on purpose: step 4 is the expensive pass (ArUco over every
+    # frame), so keeping the pzarr annotation calibration-independent means re-deriving closed width
+    # costs a re-export, not a re-detect. UMI applies it at the same stage, in
+    # the upstream UMI repo's scripts_slam_pipeline/06_generate_dataset_plan.py, not at detection.
+    #
+    # Clamped at both ends, as UMI does: its get_gripper_calibration_interpolator
+    # (umi/common/interpolation_util.py, upstream) builds an interp1d over
+    # [min_width, max_width] with bounds_error=False, fill_value=(x[0], x[-1]), so detections
+    # outside the calibrated range saturate rather than escape.
+    #
+    # Bottom: closed width is a percentile, so ~1% of detections sit below it by construction
+    # and would export negative. Top: the handheld gripper has a hard stop, so a separation
+    # above open_mm is a misread tag, not a wider demonstration — and UMI normalizes this
+    # channel by min/max, so a single bad frame sets the top of the range and squeezes the real
+    # signal into a fraction of it. The warning below is what keeps open_mm honest: a
+    # miscalibrated one announces itself rather than silently widening the range.
+    max_opening_m = open_width_m - closed_width_m
+    gripper = np.asarray(arr(ep, 'annotations/gripper_width/width_m')[:], dtype=np.float64)
+    # Filtered before the offset and the clamp, so an isolated misread is replaced by its
+    # neighbours rather than saturated at the stroke — a clamped outlier is still a wrong
+    # label, just a bounded one.
+    gripper = _median_filter_1d(gripper, GRIPPER_MEDIAN_WINDOW)
+    gripper = np.maximum(gripper - closed_width_m, 0.0)
+    over = gripper > max_opening_m
+    n_over = int(over.sum())
+    if n_over:
+        # Scattered over-stroke samples and one long run are different faults, and the count
+        # alone cannot tell them apart. A run is the ArUco width ramping away and never
+        # recovering — smooth, plausible-looking, and clamped to a flat wall at full-open that
+        # the demonstration never did. That is a corrupt episode, not a calibration error, and
+        # it should be marked unusable in scene.json rather than exported.
+        runs = _split_runs(over)
+        longest = max((b - a + 1 for a, b in runs), default=0)
+        log.warning(
+            f'  {episode_key}: {n_over}/{len(gripper)} gripper width(s) exceed the calibrated '
+            f'stroke ({max_opening_m * 1e3:.2f} mm, max seen {gripper.max() * 1e3:.2f} mm); '
+            f'clamping. A few are misread tags; many mean open_mm in gripper_calib.yaml is '
+            f'wrong — re-derive it with `pingest calibrate-gripper`.'
+        )
+        if longest >= GRIPPER_OVER_STROKE_RUN_FRAMES:
+            log.warning(
+                f'  {episode_key}: {longest} CONSECUTIVE frames over stroke — this looks like '
+                f'ArUco tracking running away, not misread tags. The clamped label is a flat '
+                f'wall at full-open that never happened. Review it and, if so, mark it unusable '
+                f'in scene.json before training on this export.'
+            )
+    gripper = np.minimum(gripper, max_opening_m)
+
+    n = len(gopro_ts)
+    if not (len(pose) == len(gripper) == n):
+        raise RuntimeError(
+            f'{episode_key}: GoPro-grid arrays disagree in length — '
+            f'gopro_ts={n}, eef/{array_name}={len(pose)}, gripper={len(gripper)}. '
+            f'eef/{array_name} and gripper_width must be on the GoPro grid (steps 4 and 5).'
+        )
+
+    # The step grid is the frames SLAM was actually fed, not every GoPro frame. Poses only
+    # exist on that grid (nothing is interpolated any more), so exporting the full grid would
+    # make every other row NaN. Δt is uniform at stride/rate, which is what UMI's sampler needs.
+    stride = _episode_frame_stride(ep)
+    steps = np.arange(0, n, stride)
+
+    # Before any segment is cut, so a modality missing its inputs fails the export by name
+    # rather than emitting a buffer that is quietly short one observation.
+    for modality in modalities:
+        modality.prepare_episode(ep, episode_key, gopro_ts, stride)
+
+    # Mask out the idle prefix before the sync chirp: the operator waits for the chirp, so those
+    # frames shouldn't train the policy. Masking (rather than nudging a start index) means the
+    # exported span is exactly the span quality.py gates on, and it composes with segmentation.
+    chirp_trimmed = 0
+    chirp_end_s = None
+    if 'annotations/time_sync' in ep:
+        chirp_end_s = grp(ep, 'annotations/time_sync').attrs.get('gopro_chirp_end_s')
+    if chirp_end_s is None:
+        # enforce_preprocessing (checked in _append_scene_episodes) guarantees step 1 ran, but
+        # not that this specific marker exists (e.g. an older pzarr predating it) — stay non-fatal.
+        log.warning(
+            f'  {episode_key}: no gopro_chirp_end_s annotation (missing, or an older pzarr '
+            f'predating this marker); exporting without start trim.'
+        )
+    else:
+        trimmed = steps[gopro_ts[steps] >= float(chirp_end_s)]
+        if len(trimmed) < min_segment_steps:
+            # A chirp end past (or nearly past) the episode means the detection was wrong, not
+            # that the demo is one long idle prefix. Dropping the episode on that evidence would
+            # let one bad correlation peak silently delete real data, so distrust the marker.
+            log.warning(
+                f'  {episode_key}: chirp end leaves only {len(trimmed)} of {len(steps)} steps — '
+                f'likely a bad chirp detection; not trimming.'
+            )
+        else:
+            chirp_trimmed = len(steps) - len(trimmed)
+            log.info(f'  {episode_key}: trimmed {chirp_trimmed} step(s) before chirp end.')
+            steps = trimmed
+
+    # Kept separately as well as combined, so a cut can name the stream that caused it rather
+    # than reporting every split as a pose gap.
+    masks: list[tuple[str, np.ndarray]] = [
+        ('pose_gap', ~np.isnan(pose[steps]).any(axis=1)),
+        ('gripper_gap', ~np.isnan(gripper[steps])),
+    ]
+    # A modality that cannot cover part of the span narrows the same mask, so an uncovered
+    # stretch is trimmed or split around exactly as a pose dropout is. Excluding those steps is
+    # what stops a sensor which stops early from being exported as a frozen observation.
+    for modality in modalities:
+        mask = modality.valid_steps(steps)
+        if mask is None:
+            continue
+        n_uncovered = int((~mask).sum())
+        if n_uncovered:
+            log.info(
+                f'  {episode_key}: {modality.name} covers {len(steps) - n_uncovered} of '
+                f'{len(steps)} step(s); excluding the rest.'
+            )
+        masks.append((modality.name, mask))
+    valid = np.logical_and.reduce([m for _, m in masks])
+
+    # A relocalization teleport makes the trajectory wrong at one *transition*, not at either
+    # frame: both poses are internally consistent, they just aren't consistent with each other.
+    # So it cuts rather than invalidating, and rather than condemning the session — the world
+    # frame cancels out of the relative trajectory the policy trains on (see module docstring),
+    # so a rigid displacement between two segments costs nothing once they are separate
+    # episodes. NaN rows give NaN diffs and `nan > thr` is False, so a pair spanning a tracking
+    # gap raises no break here — it does not need one, the gap already split the run. Same
+    # adjacent-pairs-only rule as `_max_pose_jump_m` (eef_pose_step.py), which measures the max
+    # of exactly these distances.
+    max_jump_m = (thresholds if thresholds is not None else quality.load_quality_thresholds()).max_pose_jump_m
+    step_m = np.linalg.norm(np.diff(pose[steps, :3], axis=0), axis=1)
+    break_after = step_m > max_jump_m
+    n_jumps = int((break_after & valid[:-1] & valid[1:]).sum())
+    if n_jumps:
+        log.info(
+            f'  {episode_key}: {n_jumps} pose jump(s) over {max_jump_m * 100:.0f} cm '
+            f'(max {step_m[~np.isnan(step_m)].max() * 100:.0f} cm); cutting there.'
+        )
+
+    runs = _split_runs(valid, break_after)
+    kept = [(s, e) for s, e in runs if e - s + 1 >= min_segment_steps]
+    dropped = [(s, e) for s, e in runs if e - s + 1 < min_segment_steps]
+
+    # A jump cuts *between* two valid steps, so it is asked about by boundary index rather than
+    # looked up in `masks` (which are per-step). The two causes can't collide: a NaN neighbour
+    # makes the diff NaN, so break_after is False wherever a gap already splits the run.
+    cuts: list[tuple[str, str]] = []
+    for s, e in kept:
+        if s == 0:
+            start_why = 'chirp' if chirp_trimmed else 'episode_start'
+        else:
+            start_why = 'pose_jump' if break_after[s - 1] else _cut_reason(s - 1, masks)
+        if e == len(steps) - 1:
+            end_why = 'episode_end'
+        else:
+            end_why = 'pose_jump' if break_after[e] else _cut_reason(e + 1, masks)
+        cuts.append((start_why, end_why))
+
+    plan = EpisodePlan(
+        steps=steps,
+        step_ts=gopro_ts[steps],
+        segments=kept,
+        cuts=cuts,
+        dropped=dropped,
+        stride=stride,
+        min_steps=min_segment_steps,
+    )
+    return plan, pose, gripper
+
+
+def _export_episode(
+    ep: zarr.Group,
+    data_grp: zarr.Group,
+    episode_key: str,
+    scene_zarr: pathlib.Path,
+    pose_source: str,
+    closed_width_m: float,
+    open_width_m: float,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
+) -> list[tuple[int, dict]]:
+    """
+    Export one session as one DP episode per contiguous valid segment.
+
+    Returns ``[(T, provenance), ...]`` — possibly empty if nothing survived, one entry per
+    segment appended to ``data_grp``.
+    """
+    plan, pose, gripper = plan_episode_segments(
+        ep,
+        episode_key,
+        pose_source,
+        closed_width_m=closed_width_m,
+        open_width_m=open_width_m,
+        min_segment_steps=min_segment_steps,
+        modalities=modalities,
+    )
+    pose_attrs = arr(ep, f'eef/pose_{pose_source}').attrs
+    steps, segments = plan.steps, plan.segments
+    if not segments:
+        log.warning(
+            f'  {episode_key}: no valid run of >={min_segment_steps} steps '
+            f'({plan.min_seconds:.2f} s) in {len(steps)} fed frames; skipping.'
+        )
+        return []
+    if len(segments) > 1:
+        causes = ', '.join(sorted({end for _, end in plan.cuts if end != 'episode_end'}))
+        log.info(f'  {episode_key}: split into {len(segments)} episodes ({causes}).')
+    frames = open_gopro_frames(ep, scene_zarr)
+
+    results: list[tuple[int, dict]] = []
+    for seg_i, (s0, s1) in enumerate(segments):
+        gidx = steps[s0 : s1 + 1]
+        t = len(gidx)
+
+        # No resampling: the stored Δt *is* the dataset's, and UMI sets the observation rate
+        # from it via obs_down_sample_steps. A gap much larger than the median means a dropped
+        # frame, which would be stored as one ordinary step and silently bend the time base.
+        span_ts = plan.step_ts[s0 : s1 + 1]
+        rate = _measure_rate(span_ts)
+        max_gap = float(np.max(np.diff(span_ts)))
+        if max_gap > _GAP_WARN_FACTOR / rate:
+            log.warning(
+                f'  {episode_key}: largest inter-frame gap {max_gap * 1e3:.0f} ms is '
+                f'>{_GAP_WARN_FACTOR:g}x the {1e3 / rate:.1f} ms median — a dropped frame is stored '
+                f'as one step, breaking the uniform-rate assumption there.'
+            )
+
+        pos = pose[gidx, :3].astype(np.float32)
+        rotvec = Rotation.from_quat(pose[gidx, 3:]).as_rotvec().astype(np.float32)
+        tcp6 = np.concatenate([pos, rotvec], axis=1)  # (T,6) [pos, rotvec] — UMI's tcp_pose
+
+        arrays = {
+            _CAMERA: _decode_resized_frames(frames, gidx),
+            f'{_ROBOT}_eef_pos': pos,
+            f'{_ROBOT}_eef_rot_axis_angle': rotvec,
+            f'{_ROBOT}_gripper_width': gripper[gidx, None].astype(np.float32),
+            f'{_ROBOT}_demo_start_pose': np.broadcast_to(tcp6[0], (t, 6)).copy(),
+            f'{_ROBOT}_demo_end_pose': np.broadcast_to(tcp6[-1], (t, 6)).copy(),
+        }
+        for modality in modalities:
+            for key, value in modality.segment_arrays(gidx).items():
+                if key in arrays:
+                    raise RuntimeError(f'{episode_key}: modality {modality.name!r} would overwrite {key!r}')
+                if len(value) != t:
+                    raise RuntimeError(
+                        f'{episode_key}: modality {modality.name!r} returned {len(value)} row(s) '
+                        f'for {key!r}, expected {t}'
+                    )
+                arrays[key] = value
+        # Still one _append for the whole segment, so episode_ends accounting can't drift
+        # between the visuomotor keys and a modality's.
+        _append(data_grp, arrays)
+        seg_label = f' segment {seg_i}' if len(segments) > 1 else ''
+        log.info(f'  {episode_key}{seg_label}: {t} steps @ {rate:.2f} Hz (pose={pose_source})')
+        # 'episode'/'scene'/'session' are filled in by the caller (_append_scene_episodes), which
+        # knows the plain episode key ('episode_0') and scene/session names — episode_key here is
+        # the combined 'scene_label/episode_0' string used only for log/error messages.
+        ep_provenance = {
+            'source': pose_source,
+            'world_frame': pose_attrs.get('world_frame'),
+            **plan.segment_record(seg_i),
+        }
+        # Absent entirely when nothing extra was exported, so the default --type dp's sidecar
+        # and meta attrs stay byte-identical to a plain visuomotor buffer.
+        if modalities:
+            ep_provenance['modalities'] = {m.name: m.segment_provenance(gidx) for m in modalities}
+        results.append((t, ep_provenance))
+    return results
+
+
+def _zip_zarr_dir(zarr_dir: pathlib.Path, out_path: pathlib.Path) -> None:
+    """Pack the *contents* of a directory zarr into a ``.zarr.zip`` readable by zarr.ZipStore."""
+    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_STORED) as zf:
+        for path in sorted(zarr_dir.rglob('*')):
+            if path.is_file():
+                zf.write(path, path.relative_to(zarr_dir).as_posix())
+
+
+def _required_steps(modalities: Sequence[ExportModality]) -> set[int]:
+    """
+    Preprocessing steps an export actually depends on.
+
+    Not simply every registered step: one that feeds only an optional modality
+    (``required_for_export = False``) would otherwise strand every scene preprocessed before
+    that step existed, for an export that never reads it. Each modality adds back exactly the
+    steps it needs.
+    """
+    required = {cls.step_number for cls in available_preprocessing_steps() if cls.required_for_export}
+    for modality in modalities:
+        required |= set(modality.required_steps)
+    return required
+
+
+def _check_preprocessing_complete(root: zarr.Group, scene_label: str, required: set[int]) -> None:
+    """
+    Raise if the scene is missing any preprocessing step this export depends on.
+
+    The DP export reads the outputs of the whole pipeline (``eef/pose`` from step 5,
+    gripper width from step 4, and the chirp-end marker from step 1), so an incompletely
+    preprocessed scene would silently export a partial/untrimmed dataset. Callers can bypass
+    this with ``enforce_preprocessing=False``.
+    """
+    done = set(preprocessing_steps_done(root))
+    missing = sorted(required - done)
+    if missing:
+        raise RuntimeError(
+            f'{scene_label}: preprocessing steps {missing} not complete (done={sorted(done)}). '
+            f'Run `pingest pp` first, or export with enforce_preprocessing=False to skip this check.'
+        )
+
+
+def iter_exportable_episodes(
+    scene_path: pathlib.Path,
+    enforce_preprocessing: bool = True,
+    modalities: Sequence[ExportModality] = (),
+) -> Iterator[tuple[str, str, str, zarr.Group, str]]:
+    """
+    Yield ``(scene_label, ep_key, session_dir, ep_group, pose_source)`` per exportable session.
+
+    The MAPPING skip, the ``scene.json`` unusable set, and the pose-source resolution, in one
+    place so the real export and ``--dry-run`` select exactly the same sessions — a
+    preview that disagreed with the export about *which* episodes count would be worse than no
+    preview at all.
+    """
+    zarr_path = SceneFiles.resolve_zarr_path(scene_path)
+    if not zarr_path.exists():
+        raise FileNotFoundError(f'No scene.zarr found at {scene_path}')
+
+    # zarr_path.name is always the literal 'scene.zarr', identical across every scene; use the
+    # scene directory's own name so multi-scene exports can tell episodes from different scenes
+    # apart in logs/errors (otherwise every scene logs as e.g. 'scene.zarr/episode_0').
+    scene_label = zarr_path.parent.name
+
+    # scene.json (not the pzarr) is the canonical home of the unusable-episode marker set and
+    # the pose-source override, both from the catalog UI, so it's checked here rather than
+    # baked into pzarr at build time.
+    manifest = SceneManifest.from_scene_dir(zarr_path.parent)
+    unusable_dirs = set(manifest.unusable_episodes) if manifest else set()
+    pose_source_overrides = manifest.pose_source_overrides if manifest else {}
+
+    root = zarr.open_group(str(zarr_path), mode='r')
+    if enforce_preprocessing:
+        _check_preprocessing_complete(root, scene_label, _required_steps(modalities))
+    for i in range(int(root.attrs.get('n_episodes', 0))):
+        ep_key = f'episode_{i}'
+        if ep_key not in root:
+            log.warning(f'{ep_key} not found in {scene_label}, skipping.')
+            continue
+        ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
+        if ep.attrs.get('session_type') == 'MAPPING':
+            log.info(f'  {scene_label}/{ep_key}: MAPPING session, skipping.')
+            continue
+        session_dir = ep.attrs.get('session_dir')
+        if session_dir in unusable_dirs:
+            log.info(f'  {scene_label}/{ep_key}: marked unusable, skipping.')
+            continue
+        pose_source = resolve_pose_source(ep, f'{scene_label}/{ep_key}', pose_source_overrides.get(session_dir))
+        yield scene_label, ep_key, session_dir, ep, pose_source
+
+
+def _append_scene_episodes(
+    scene_path: pathlib.Path,
+    data_grp: zarr.Group,
+    episode_ends: list[int],
+    total: int,
+    provenance: list[dict],
+    closed_width_m: float,
+    open_width_m: float,
+    enforce_preprocessing: bool = True,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
+) -> int:
+    """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
+    zarr_path = SceneFiles.resolve_zarr_path(scene_path)
+    for scene_label, ep_key, session_dir, ep, pose_source in iter_exportable_episodes(
+        scene_path, enforce_preprocessing=enforce_preprocessing, modalities=modalities
+    ):
+        # One session can yield several episodes — a dropout or a pose jump splits it into the
+        # usable runs either side — or none, if nothing survived the chirp trim and the floor.
+        for t, ep_provenance in _export_episode(
+            ep,
+            data_grp,
+            f'{scene_label}/{ep_key}',
+            zarr_path,
+            pose_source,
+            min_segment_steps=min_segment_steps,
+            closed_width_m=closed_width_m,
+            open_width_m=open_width_m,
+            modalities=modalities,
+        ):
+            total += t
+            episode_ends.append(total)
+            provenance.append({'scene': scene_label, 'session': session_dir, 'episode': ep_key, **ep_provenance})
+    return total
+
+
+def export_scene_to_dp(
+    scene_path: pathlib.Path,
+    output_path: pathlib.Path,
+    enforce_preprocessing: bool = True,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
+) -> tuple[int, list[dict]]:
+    """
+    Export EPISODE sessions of a pzarr scene to a UMI-format ``.zarr.zip`` ReplayBuffer.
+
+    Poses come from ``eef/pose_<source>`` (preprocessing step 5, which writes one array per
+    available source); *this* function resolves the optitrack-vs-slam choice per episode — see
+    ``resolve_pose_source`` — and puts the trajectory on the hand frame.
+
+    When ``enforce_preprocessing`` is True (default), the scene must have every registered
+    preprocessing step complete or export raises. This does not by itself guarantee the
+    chirp-end marker is present — a scene preprocessed before that marker was added can still
+    be missing it, in which case the start trim is skipped non-fatally (see ``_export_episode``).
+    Set ``enforce_preprocessing`` False to export a partially preprocessed scene instead.
+
+    Returns ``(n_episodes, provenance)`` — the episode count and a per-episode pose-source
+    provenance list (also embedded in the ``.zarr.zip``'s ``meta`` attrs; see module docstring).
+    MAPPING sessions and episodes marked unusable in ``scene.json`` are skipped.
+    """
+    return export_scenes_to_dp(
+        [scene_path],
+        output_path,
+        enforce_preprocessing=enforce_preprocessing,
+        min_segment_steps=min_segment_steps,
+        modalities=modalities,
+    )
+
+
+def export_scenes_to_dp(
+    scene_paths: list[pathlib.Path],
+    output_path: pathlib.Path,
+    enforce_preprocessing: bool = True,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
+) -> tuple[int, list[dict]]:
+    """
+    Export EPISODE sessions from one or more pzarr scenes into a single UMI ``.zarr.zip``.
+
+    Each scene's episodes are appended in the given order, with ``episode_ends`` accumulating
+    across the whole list — a multi-scene dataset is indistinguishable from a single big scene
+    to ``UmiDataset``, which only ever sees one buffer. MAPPING sessions and episodes marked
+    unusable in ``scene.json`` are skipped scene by scene, same as the single-scene exporter.
+    Poses come from ``eef/pose_<source>`` (preprocessing step 5); the per-episode source choice
+    is resolved here (see ``resolve_pose_source``). ``enforce_preprocessing`` (default True)
+    requires every registered preprocessing step to be complete on each scene.
+
+    Returns ``(n_episodes, provenance)`` — the total episode count across all scenes and a
+    per-episode pose-source provenance list, in export order (also embedded in the ``.zarr.zip``
+    as ``meta.attrs['pose_provenance']`` / ``meta.attrs['episode_pose_source']``).
+    """
+    if not scene_paths:
+        raise ValueError('No scenes given to export.')
+
+    # Resolved once for the whole buffer, not per scene: every episode in one ReplayBuffer has to
+    # be in the same width units, and re-reading the config mid-export would silently mix two
+    # calibrations if the file changed underneath.
+    closed_width_m = load_closed_width_m()
+    open_width_m = load_open_width_m()
+    log.info(
+        f'Gripper widths exported as opening-from-closed (closed width = {closed_width_m * 1000:.2f} mm), '
+        f'clamped to the calibrated stroke ({(open_width_m - closed_width_m) * 1000:.2f} mm).'
+    )
+
+    with tempfile.TemporaryDirectory(prefix='dp_export_') as tmp:
+        build_dir = pathlib.Path(tmp) / 'buffer.zarr'
+        out = zarr.open_group(str(build_dir), mode='w', zarr_format=2)
+        meta = out.create_group('meta')
+        data = out.create_group('data')
+
+        episode_ends: list[int] = []
+        provenance: list[dict] = []
+        total = 0
+        for scene_path in scene_paths:
+            total = _append_scene_episodes(
+                scene_path,
+                data,
+                episode_ends,
+                total,
+                provenance,
+                enforce_preprocessing=enforce_preprocessing,
+                min_segment_steps=min_segment_steps,
+                closed_width_m=closed_width_m,
+                open_width_m=open_width_m,
+                modalities=modalities,
+            )
+
+        # Every episode in one buffer must share a time base: UmiDataset reads a single
+        # episode_ends array and assumes one uniform Δt across all of it, so a mix of strides
+        # would train on two different notions of "one step" with nothing recording which.
+        strides = {p['frame_stride'] for p in provenance if 'frame_stride' in p}
+        if len(strides) > 1:
+            raise RuntimeError(
+                f'Refusing to write a mixed-rate buffer: episodes were localized at frame strides '
+                f'{sorted(strides)}, so their steps span different durations. Re-run `pingest pp 2 '
+                f'--force` on the odd scenes so every episode shares one stride.'
+            )
+
+        if not episode_ends:
+            raise RuntimeError('no EPISODE sessions to export across the given scene(s).')
+
+        meta.create_array('episode_ends', data=np.array(episode_ends, dtype=np.int64), compressor=_BLOSC)
+        # Inert cargo for UmiDataset (it only reads meta/episode_ends) — lets anyone who opens
+        # the .zarr.zip directly see which pose source produced each episode without needing the
+        # external manifest/sidecar too. See module docstring.
+        meta.attrs['pose_provenance'] = provenance
+        meta.attrs['episode_pose_source'] = [p['source'] for p in provenance]
+        # What ``robot0_gripper_width`` means, carried with the data. Without it a buffer is
+        # indistinguishable from one exported before the subtraction existed, and the inference
+        # side needs to know which convention a checkpoint was trained under to pick its offset.
+        meta.attrs['gripper_closed_width_m'] = float(closed_width_m)
+        meta.attrs['gripper_open_width_m'] = float(open_width_m)
+        # The length floor this buffer was cut with. Recorded because the catalog's build button
+        # calls the exporter with no knobs, so a change to the default would otherwise be
+        # invisible in the artifact; and because whether an episode can yield training samples at
+        # all is a function of this number against the sampler's own horizon floor.
+        meta.attrs['min_segment_steps'] = int(min_segment_steps)
+        # Same idea, per modality: the geometry a modality's rows were cut with, carried with the
+        # data so a checkpoint says what it was trained on rather than relying on the config file
+        # still reading the same way months later.
+        for modality in modalities:
+            meta.attrs.update(modality.meta_attrs())
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _zip_zarr_dir(build_dir, output_path)
+
+    log.info(f'Wrote {len(episode_ends)} episode(s) from {len(scene_paths)} scene(s), {total} steps → {output_path}')
+    return len(episode_ends), provenance

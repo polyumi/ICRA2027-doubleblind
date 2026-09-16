@@ -1,0 +1,26 @@
+# RealSense D455 parameter file for realsense2_camera ROS 2 node
+# A full list of configurable parameters can be found at:
+# https://github.com/realsenseai/realsense-ros/tree/r/4.56.4?tab=readme-ov-file#parameters
+
+enable_color: true
+enable_depth: false                        
+enable_infra0: false                       
+enable_infra1: false                       
+enable_infra2: false                       
+pointcloud.enable: false                   
+enable_gyro: false                         
+enable_accel: false                        
+enable_rgbd: false                         
+enable_motion: false                       
+align_depth.enable: false                  
+colorizer.enable: false                    
+decimation_filter.enable: false     
+rotation_filter.enable: false      
+spatial_filter.enable: false        
+temporal_filter.enable: false       
+disparity_filter.enable: false      
+hole_filling_filter.enable: false   
+hdr_merge.enable: false    
+rgb_camera.color_profile: 640x480x30
+enable_sync: false
+device_type: "d455"

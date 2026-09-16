@@ -1,0 +1,17 @@
+# Mobile FR3 Duo Configuration File
+# This file configures a mobile dual-arm Franka FR3 setup
+# with a mobile base platform
+
+# Configuration for the mobile FR3 duo setup
+# robot_types[0] = mobile base (tmrv0_2), [1,2] = FR3 arms
+mobile_fr3_duo_robot:
+  robot_types: "['tmrv0_2', 'fr3v2', 'fr3v2']"
+  robot_ips: "['172.16.16.10', '172.16.16.11', '172.16.16.12']"
+  robot_prefixes: "['', 'left', 'right']"
+  load_gripper: "false"
+  use_fake_hardware: "false"
+  fake_sensor_commands: "false"
+  namespace: ''
+  joint_state_rate: 30
+  thread_priority: 98
+  use_rviz: "true"

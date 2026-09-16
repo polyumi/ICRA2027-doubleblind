@@ -1,0 +1,17 @@
+# SICK nanoScan3 parameter file for sick_safetyscanners2 ROS 2 node
+# A full list of configurable parameters can be found at:
+# https://github.com/SICKAG/sick_safetyscanners2/tree/master?tab=readme-ov-file#ros2-parameters
+
+channel: 0
+channel_enabled: true
+skip: 0
+angle_start: -0.7854
+angle_end: 3.9270
+time_offset: 0.0
+general_system_state: true
+derived_settings: true
+measurement_data: true
+intrusion_data: true
+application_io_data: true
+use_persistent_config: true
+min_intensities: 0.0

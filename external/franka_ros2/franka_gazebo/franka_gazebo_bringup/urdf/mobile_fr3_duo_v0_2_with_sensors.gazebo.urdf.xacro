@@ -1,0 +1,89 @@
+<?xml version="1.0"?>
+<!-- Copyright (c) 2026 Franka Robotics GmbH
+     Licensed under the Apache License, Version 2.0 (the "License");
+     you may not use this file except in compliance with the License.
+     You may obtain a copy of the License at
+         http://www.apache.org/licenses/LICENSE-2.0 -->
+
+<!--
+  Gazebo entry point for the Mobile FR3 Duo v0.2 with BOTH sensor suites.
+
+  ARCHITECTURE: Modular composition from source packages:
+    - Layer 1: Base robot from franka_description
+    - Layer 2a: Mobile platform sensors from franka_mobile_sensors  
+    - Layer 2b: Vision kit accessories from franka_vision_and_manipulation_kit
+    - Layer 3: Gazebo plugins applied by franka_gazebo_bringup
+
+  Result: Robot with 10 sensors fully simulated in Gazebo
+    - 4x RGB cameras (mobile platform) from franka_mobile_sensors
+    - 2x LiDARs (mobile platform) from franka_mobile_sensors
+    - 1x Body IMU (mobile platform) from franka_mobile_sensors
+    - 2x Wrist cameras D405 (vision kit) from franka_vision_and_manipulation_kit
+    - 1x Head camera ZED Mini (vision kit) from franka_vision_and_manipulation_kit
+-->
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="mobile_fr3_duo_v0_2_gazebo_sensors">
+
+  <!-- ================================================================ -->
+  <!-- Gazebo-specific argument overrides                               -->
+  <!-- ================================================================ -->
+  <!-- Declared before the description entry point is included so they win over its
+       defaults: the mobile platform uses two-arm robot types and suppresses the
+       self-collision capsule geometry. -->
+  <xacro:arg name="robot_types"                     default="['tmrv0_2','fr3v2','fr3v2']" />
+  <xacro:arg name="include_self_collision_geometry" default="false"/>
+
+  <!-- Effort command interfaces for the Gazebo hardware plugin (Gazebo-only). -->
+  <xacro:arg name="gazebo_effort" default="false"/>
+
+  <!-- ================================================================ -->
+  <!-- Includes                                                         -->
+  <!-- ================================================================ -->
+
+  <!-- Base robot (Layer 1): declares the shared args and calls the mobile macro with
+       empty extras. -->
+  <xacro:include filename="$(find franka_description)/robots/mobile_fr3_duo_v0_2/mobile_fr3_duo_v0_2.urdf.xacro"/>
+
+  <!-- Mobile platform sensor components (Layer 2a) -->
+  <xacro:include filename="$(find franka_mobile_sensors)/robots/sensor_suite.xacro"/>
+
+  <!-- Vision kit accessory components (Layer 2b) -->
+  <xacro:include filename="$(find franka_vision_and_manipulation_kit)/robots/vision_kit_components.xacro"/>
+
+  <!-- ros2_control hardware interface macros + gazebo overlay macro -->
+  <xacro:include filename="$(find franka_gazebo_bringup)/urdf/mobile_fr3_duo.ros2_control.xacro"/>
+  <!-- Gazebo hardware-plugin block + gz_ros2_control system (owned by franka_gazebo_bringup) -->
+  <xacro:include filename="$(find franka_gazebo_bringup)/urdf/franka_gazebo_hardware_plugins.xacro"/>
+  <!-- Gazebo transmissions and SDF tag macros -->
+  <xacro:include filename="$(find franka_gazebo_bringup)/urdf/franka_gazebo_transmissions.xacro"/>
+
+  <!-- Gazebo sensor plugins (Layer 3) -->
+  <xacro:include filename="$(find franka_gazebo_bringup)/urdf/sensors.xacro" />
+
+  <!-- Per-arm prefixes consumed by the gazebo overlay (the mobile macro keeps these
+       internal, so the entry point re-states them for the overlay). -->
+  <xacro:property name="arm_prefixes_list" value="${['left','right']}"/>
+
+  <!-- ================================================================ -->
+  <!-- Base robot + transmissions + sensor accessories + ros2_control   -->
+  <!-- (Layer 2a mobile platform + Layer 2b vision kit go in-between)   -->
+  <!-- ================================================================ -->
+  <xacro:mobile_fr3_duo_gazebo_composition>
+    <sensor_layer>
+      <xacro:sensor_suite />
+      <xacro:vision_kit_components left_arm_type="fr3v2" right_arm_type="fr3v2" prefix="" robotiq_use_fake_hardware="true" robotiq_include_ros2_control="true" sim_gazebo="true" />
+    </sensor_layer>
+  </xacro:mobile_fr3_duo_gazebo_composition>
+
+  <!-- ================================================================ -->
+  <!-- LAYER 3: Gazebo Sensor Plugins                                  -->
+  <!-- ================================================================ -->
+
+  <!-- Mobile Platform Sensors (4x D455 RGB, 2x LiDAR, 1x IMU) -->
+  <xacro:franka_gazebo_mobile_platform_sensors/>
+
+  <!-- Vision Kit Sensors (2x D405 wrist, 1x ZED head) -->
+  <xacro:franka_gazebo_vision_kit_sensors/>
+
+
+</robot>

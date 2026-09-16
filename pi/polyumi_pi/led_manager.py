@@ -1,0 +1,48 @@
+"""Manages the LED strip that lights the sensor surface."""
+
+import logging
+
+import rpi_hardware_pwm
+
+log = logging.getLogger('pi_led_manager')
+
+DEFAULT_BRIGHTNESS = 0.5
+
+
+class LEDManager:
+    """Manages the LED strip that lights the sensor surface."""
+
+    # transistor controlling led strip is connected here
+    # pin 12 on the actual header, which is PWM channel 0 on the BCM2710
+    # due to customizing /boot/firmware/config.txt (see that file),
+    # pwm0 connects to GPIO12 aka pin 32 on the header
+    GPIO_PIN = 32
+    PWM_CHANNEL = 0
+
+    def __init__(self) -> None:
+        """Initialize the LED manager."""
+        self.pwm: rpi_hardware_pwm.HardwarePWM = rpi_hardware_pwm.HardwarePWM(self.PWM_CHANNEL, hz=1000, chip=0)
+        self.pwm.start(0)
+
+    def set_brightness(self, brightness: float | None = None) -> None:
+        """
+        Set the brightness of the LED strip.
+
+        Args:
+            brightness: Brightness in [0.0, 1.0]. Defaults to DEFAULT_BRIGHTNESS when None.
+
+        """
+        if brightness is None:
+            brightness = DEFAULT_BRIGHTNESS
+        duty_cycle = int(brightness * 100)
+        self.pwm.change_duty_cycle(duty_cycle)
+        log.info(f'Set LED brightness to {brightness:.2f} (duty cycle: {duty_cycle}%)')
+
+    def close(self) -> None:
+        """Stop the PWM channel. Idempotent."""
+        if self.pwm is not None:
+            self.pwm.stop()
+
+    def __del__(self) -> None:
+        """Ensure resources are cleaned up on deletion."""
+        self.close()

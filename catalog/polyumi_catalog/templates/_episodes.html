@@ -1,0 +1,32 @@
+<div id="col-episodes-body" class="col-body"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if not sessions %}
+  <p class="placeholder">No sessions.</p>
+  {% endif %}
+  {% for s in sessions %}
+  <div
+    class="item{% if s.unusable %} item-unusable{% endif %}"
+    role="button"
+    tabindex="0"
+    hx-get="/select/session/{{ s.session_id }}"
+    hx-target="#detail-body"
+    hx-swap="outerHTML"
+  >
+    <img class="thumb" src="/sessions/{{ s.session_id }}/thumbnail.jpg" loading="lazy" alt="" onerror="this.remove()" />
+    <span class="item-name" title="{{ s.name }}">{{ s.name }}</span>
+    <span class="badges">
+      <span class="badge type-{{ s.session_type | lower }}">{{ s.session_type }}</span>
+      {% if s.unusable %}
+      <span class="badge warn" title="excluded from dataset exports{% if s.auto_unusable_reasons %} — {{ s.auto_unusable_reasons | join('; ') }}{% endif %}">
+        unusable{% if s.auto_unusable and not s.unusable_manual %} (auto){% endif %}
+      </span>
+      {% endif %}
+      {% if s.video_dropped_frames %}<span class="badge warn" title="dropped video frames">⚠ {{ s.video_dropped_frames }}</span>{% endif %}
+      {% if s.slam_tracking_ratio is not none %}
+      <span class="badge{% if s.slam_low_quality %} warn{% endif %}" title="SLAM tracking ratio">
+        {{ '%.0f%%' % (s.slam_tracking_ratio * 100) }} tracked
+      </span>
+      {% endif %}
+    </span>
+  </div>
+  {% endfor %}
+</div>

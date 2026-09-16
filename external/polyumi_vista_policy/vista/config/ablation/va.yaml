@@ -1,0 +1,7 @@
+# @package _global_
+# Vision-audio ablation: GoPro + contact mic + proprio.
+policy:
+  sensor_group: va
+
+logging:
+  tags: ["${name}", "${task_name}", "${exp_name}", "ablation:va"]

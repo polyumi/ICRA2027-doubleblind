@@ -1,0 +1,23 @@
+THIRD-PARTY ATTRIBUTION
+=======================
+
+This project incorporates work from the following MIT-licensed projects.
+
+serl_franka_controllers
+-----------------------
+https://github.com/rail-berkeley/serl_franka_controllers
+
+The Cartesian impedance control law in
+franka_streaming_impedance_controller/src/cartesian_impedance_law.cpp is ported from
+serl_franka_controllers, itself derived from franka_ros's
+cartesian_impedance_example_controller. It is the same law polymetis runs (torchcontrol
+OperationalSpacePD), with the error sign convention flipped and two additions kept from
+SERL: a per-axis error clip, and a nullspace term.
+
+Universal Manipulation Interface (UMI)
+--------------------------------------
+https://github.com/real-stanford/universal_manipulation_interface
+
+The reference generator in
+franka_streaming_impedance_controller/src/pose_trajectory_interpolator.cpp is ported from
+UMI's PoseTrajectoryInterpolator.

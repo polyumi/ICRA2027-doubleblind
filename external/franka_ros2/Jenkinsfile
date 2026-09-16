@@ -1,0 +1,275 @@
+#!groovy
+@Library('fe-gitlab-pipeline-steps@lts-2.2') _
+import de.franka.jenkins.FePipelineOptionDefaults
+pipeline {
+
+  agent {
+    node {
+      label 'fepc-lx010'
+    }
+  }
+
+  parameters {
+    string(name: 'libfrankaRepoUrl',
+           defaultValue: 'ssh://git@gitlab.franka.de/frankadev/moctrl/libfranka.git',
+           description: 'SSH URL to clone libfranka')
+
+    string(name: 'libfrankaBranch',
+           defaultValue: 'main',
+           description: 'Branch or tag to checkout for libfranka.')
+
+    string(name: 'frankaDescriptionRepoUrl',
+           defaultValue: 'ssh://git@gitlab.franka.de/frankadev/moctrl/franka_description.git',
+           description: 'SSH URL to clone franka_description.')
+
+    string(name: 'frankaDescriptionBranch',
+           defaultValue: 'main',
+           description: 'Branch or tag to checkout for franka_description.')
+
+    booleanParam(name: 'executeHardwareTestsOnRobot',
+           defaultValue: true,
+           description: "Run the franka_ros2 tests on the real hardware")
+
+    booleanParam(name: 'executeGazeboTests',
+           defaultValue: false,
+           description: "Run Gazebo simulation tests (headless, no GPU required)")
+
+    string(name: "robotIp",
+            defaultValue: "172.16.0.1",
+            description: "The static IP of the robot to run tests onto")
+  }
+
+  options {
+    gitLabConnection(FePipelineOptionDefaults.GITLAB_CONNECTION)
+    buildDiscarder(logRotator(
+      numToKeepStr: FePipelineOptionDefaults.BUILD_DISCARDER.numToKeepStr,
+      daysToKeepStr: FePipelineOptionDefaults.BUILD_DISCARDER.daysToKeepStr,
+      artifactNumToKeepStr: FePipelineOptionDefaults.BUILD_DISCARDER.artifactNumToKeepStr,
+      artifactDaysToKeepStr: FePipelineOptionDefaults.BUILD_DISCARDER.artifactDaysToKeepStr
+    ))
+  }
+
+  stages {
+    stage('Get Ready') {
+      options { skipDefaultCheckout true }
+      steps {
+        script{
+          cleanWs()
+        }
+        checkout([
+            $class: 'GitSCM',
+            branches: scm.branches,
+            userRemoteConfigs: scm.userRemoteConfigs,
+            extensions: [
+                [$class: 'RelativeTargetDirectory', relativeTargetDir: 'src'] // needed to put everything under src as expected by colcon/rosdep
+            ]
+        ])
+        script {
+          currentBuild.displayName = "[libfranka: ${params.libfrankaBranch}, franka_description: ${params.frankaDescriptionBranch}]"
+        }
+      }
+    }
+
+    stage('Fetch Dependencies') {
+      options { skipDefaultCheckout true }
+      steps {
+        sh 'echo "=== Workspace structure ===" && ls -la'
+        dir('src') {
+          script {
+
+            def repos = readYaml file: 'dependency.repos'
+            def repoMap = repos?.repositories ?: [:]
+
+            // Clone/update all 3rd party dependencies 
+            repoMap.each {repoName, cfg ->
+              def url = cfg.url 
+              def version = cfg.version ?: 'main'
+              if (repoName != 'libfranka' && repoName != 'franka_description'){
+                sh """
+                  if [ -d ${repoName} ]; then
+                    cd ${repoName}
+                    git checkout ${version}
+                    git pull
+                    cd ..
+                  else
+                    git clone --depth 1 --branch ${version} ${url} ${repoName}
+                  fi
+                """
+              }
+            }
+
+            sshagent(['git_ssh']){
+            sh """
+
+              if [ -d "libfranka" ]; then
+                cd libfranka 
+                git fetch --all --tags
+                git checkout ${params.libfrankaBranch}
+                git pull
+                cd ..
+              else
+                git clone --branch ${params.libfrankaBranch} ${params.libfrankaRepoUrl}
+                cd libfranka 
+                git config submodule.common.url ssh://git@gitlab.franka.de/frankadev/moctrl/libfranka-common.git
+                git submodule update --init --recursive --depth 1 
+                cd ..
+              fi
+
+              if [ -d "franka_description" ]; then
+                cd franka_description
+                git fetch --all --tags
+                git checkout ${params.frankaDescriptionBranch}
+                git pull
+                cd ..
+              else
+                git clone --depth 1 --branch ${params.frankaDescriptionBranch} ${params.frankaDescriptionRepoUrl}
+              fi
+              """
+            }
+          }
+          sh 'echo "=== src structure ===" && ls -la'
+        }
+      }
+    }
+
+    stage('Build') {
+      options { skipDefaultCheckout true }
+      agent {
+        dockerfile {
+          dir 'src'
+          reuseNode true
+        }
+      }
+      environment {
+        ROBOT_IP = "${params.robotIp}"
+      }
+      steps {
+        sh '''
+          . /opt/ros/$ROS_DISTRO/setup.sh
+          echo "=== Workspace structure ===" && ls -la
+          colcon build \
+            --base-paths src \
+            --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  \
+                         -DCHECK_TIDY=ON \
+                         -DBUILD_TESTS=OFF \
+                         -DBUILD_TESTING=ON  \
+                         -DROBOT_IP=$ROBOT_IP
+        '''
+      }
+    }
+
+    // Run the unit tests (no hardware tests)
+    stage('Test') {
+      options { skipDefaultCheckout true }
+      agent {
+        dockerfile {
+          dir 'src'
+          reuseNode true
+        }
+      }
+      steps {
+        sh '''
+          . install/setup.sh
+          colcon test \
+            --base-paths src \
+            --packages-select-regex '^(franka_|mobile_fr3_duo)' \
+            --packages-skip franka_gazebo_bringup \
+            --event-handlers console_direct+ \
+            --ctest-args --exclude-regex 'test_hardware'
+          colcon test-result --verbose
+        '''
+      }
+      post {
+        always {
+          junit 'build/**/test_results/**/*.xml'
+        }
+      }
+    }
+    stage("Hardware Test"){
+      when { expression { params.executeHardwareTestsOnRobot } }
+      options { skipDefaultCheckout true }
+      agent { 
+        dockerfile {
+          dir 'src'
+          reuseNode true
+          args '--network host ' +
+               '--cap-add=sys_nice ' +
+               '--ulimit rtprio=99 ' +
+               '--ulimit rttime=-1 ' +
+               '--ulimit memlock=8428281856 ' +
+               '--security-opt=seccomp=unconfined ' +
+               '-v /home/rcu/.ssh:/home/jenkins/.ssh:ro'
+        }
+      }
+
+      steps {
+        script {
+          echo "Checking connectivity to Master Controller..."
+          sh "ping -c 5 ${params.robotIp}"
+
+          echo "Rebooting Master Controller before hardware tests..."
+          sh """
+            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@${params.robotIp} /usr/lib/admin-server/restart || true
+            echo 'Waiting for controller to go down and come back...'
+            sleep 70
+            until ping -c1 -W1 ${params.robotIp} >/dev/null 2>&1; do sleep 2; done
+            echo 'Controller is reachable again.'
+          """
+
+          sh """
+            . install/setup.sh
+            chmod +x ./src/franka_ros2/scripts/*.sh
+            ./src/franka_ros2/scripts/run_hardware_tests.sh ${params.robotIp}
+          """
+        }
+      }
+    }
+
+    // Gazebo simulation tests (non-blocking, separate from unit tests)
+    stage('Gazebo Tests') {
+      when { expression { params.executeGazeboTests ?: false } }
+      options { skipDefaultCheckout true }
+      agent {
+        dockerfile {
+          dir 'src'
+          reuseNode true
+        }
+      }
+      steps {
+        // Keep the overall build green (Gazebo tests are advisory) but mark the
+        // stage UNSTABLE on failure instead of hiding it behind `|| true`, so a
+        // crash, missing dependency, or CTest startup failure is visible.
+        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+          sh '''
+            . install/setup.sh
+            # gz-transport multicast discovery is unreliable inside containers;
+            # force discovery over loopback so the spawner/bridge find the sim.
+            export GZ_IP=127.0.0.1
+            colcon test \
+              --base-paths src \
+              --packages-select franka_gazebo_bringup \
+              --event-handlers console_direct+ \
+              --ctest-args --tests-regex test_gazebo \
+              --return-code-on-test-failure
+            colcon test-result --verbose
+          '''
+        }
+      }
+      post {
+        always {
+          // Do not allow empty results: if the stage ran but produced no XML
+          // (e.g. the sim never launched), surface it rather than passing green.
+          junit allowEmptyResults: false, testResults: 'build/franka_gazebo_bringup/**/test_results/**/*.xml'
+        }
+      }
+    }
+  }
+  post {
+      always {
+          script {
+              cleanWs()
+              feNotifySCM(currentBuild.result)
+          }
+      }
+  }
+}

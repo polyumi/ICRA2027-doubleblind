@@ -1,0 +1,143 @@
+# Board task: PolyUMI plus the two tactile streams (whiteboard contact).
+#
+# Derived from task/polyumi_slip.yaml; differs only in name and finger_rgb resolution. The plain
+# visuomotor run on this same dataset uses task/polyumi.yaml unchanged -- one --type polyumi export
+# serves both, since shape_meta decides which keys a run consumes. Three things change:
+#   - finger_rgb    -> a second `rgb` key (the finger camera).
+#   - mic_0         -> the new `audio` type, encoded by MelAudioEncoder.
+#   - audio_obs_horizon, because mic_0's leading dim is audio ROWS, not observation steps.
+#
+# NOTE both rgb keys must resolve to one spatial shape -- TimmObsEncoder asserts it, since a single
+# `image_shape` drives the transform stack, feature_map_shape and AttentionPool2d. finger_rgb is
+# exported natively here and reaches that shape via `resize` in its shape_meta entry.
+# PolyUMI task config. Derived from task/umi.yaml; kept as close to it as possible so any
+# failure is our data, not a config divergence. Only three things change from umi.yaml:
+#   - name / task_name          -> polyumi
+#   - obs_down_sample_steps      -> back to UMI's 3, because since pzarr v4 the exporter stores
+#                                   only the frames SLAM was fed (localization_frame_stride 2,
+#                                   so ~29.97 Hz, not the native 59.94). 29.97/3 = 9.99 Hz,
+#                                   still the 10 Hz ROS control loop. This was 6 while we
+#                                   exported at native rate; the two must move together, since
+#                                   the stored rate times this factor IS the obs rate.
+#   - dataset_path               -> the exported .zarr.zip, bind-mounted into the container.
+#
+# shape_meta is intentionally identical to UMI's, including robot0_eef_rot_axis_angle_wrt_start
+# (the exporter emits robot0_demo_start_pose so UmiDataset can derive it).
+#
+# The *_obs_latency values are left at UMI's numbers on purpose: they are INERT while
+# dataset_frequeny: 0 (every latency_steps below multiplies by it and zeroes out). Real latency
+# compensation lives on the robot (policy_client_node) and is a separate calibration ticket.
+name: polyumi_board
+
+camera_obs_latency: 0.125
+robot_obs_latency: 0.0001
+gripper_obs_latency: 0.02
+dataset_frequeny: 0 #29.97
+obs_down_sample_steps: 3 # 29.97/3 ~= 10 Hz, matching the ROS control loop
+
+low_dim_obs_horizon: 2
+img_obs_horizon: 2
+# One mic_0 row is 536 samples at 16 kHz = 33.5 ms, so 10 rows spans ~335 ms of contact history.
+# Matches n_audio_rows in the ROS client's inference.yaml; the two must move together.
+audio_obs_horizon: 10
+action_horizon: 16
+ignore_proprioception: False
+
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  obs:
+    camera0_rgb:
+      shape: [3, 224, 224]
+      horizon: ${task.img_obs_horizon} # int
+      latency_steps: 0 # float
+      down_sample_steps: ${task.obs_down_sample_steps} # int
+      type: rgb
+      ignore_by_policy: False
+    robot0_eef_pos:
+      shape: [3]
+      horizon: ${task.low_dim_obs_horizon} # int
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+    robot0_eef_rot_axis_angle:
+      raw_shape: [3]
+      shape: [6]
+      horizon: ${task.low_dim_obs_horizon} # int
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      type: low_dim
+      rotation_rep: rotation_6d
+      ignore_by_policy: ${task.ignore_proprioception}
+    finger_rgb:
+      # 224x224, matching board_v1_polyumi_224.zarr.zip. The native 648x982 export exists and the
+      # encoder can resize it in-model (`resize:` in shape_meta), but the dataloader cannot carry
+      # it: at ~1.9 MB a frame, num_workers=8 and batch 64 over two rgb keys, the workers get
+      # OOM-killed -- "DataLoader worker exited unexpectedly" before the first batch.
+      shape: [3, 224, 224]
+      horizon: ${task.img_obs_horizon} # int
+      latency_steps: 0 # float
+      down_sample_steps: ${task.obs_down_sample_steps} # int
+      type: rgb
+      ignore_by_policy: False
+    mic_0:
+      # Raw 16 kHz contact-mic waveform, one row per exported step, exactly as
+      # ingest/polyumi_ingest/export/dp/audio.py writes it. The encoder concatenates the rows
+      # before its STFT, so this shape is per-row and the window length is the horizon above.
+      shape: [536]
+      horizon: ${task.audio_obs_horizon} # int
+      latency_steps: 0 # float
+      down_sample_steps: 1 # int -- rows are already on the step grid
+      type: audio
+      n_mels: 64
+      out_dim: 128
+      sample_rate: 16000
+      # No f_min override: the mel bands cover the full band, so the model sees the raw
+      # contact-mic signal. A 300 Hz floor measured much better (see MelAudioEncoder) --
+      # add `f_min: 300.0` here to enable it, after the raw baseline is understood.
+    robot0_gripper_width:
+      shape: [1]
+      horizon: ${task.low_dim_obs_horizon} # int
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.gripper_obs_latency}) * ${task.dataset_frequeny}'} # float
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+
+    # pose with respect to episode start
+    robot0_eef_rot_axis_angle_wrt_start:
+      raw_shape: [3]
+      shape: [6]
+      horizon: ${task.low_dim_obs_horizon} # int
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+  action:
+    shape: [10]
+    horizon: ${task.action_horizon}
+    latency_steps: 0 # float
+    down_sample_steps: ${task.obs_down_sample_steps} # int
+    rotation_rep: rotation_6d
+
+task_name: &task_name polyumi_board
+# Bind-mounted into the container by the run wrapper; override with task.dataset_path=... .
+dataset_path: /data/dataset.zarr.zip
+pose_repr: &pose_repr
+  obs_pose_repr: relative # abs or rel
+  action_pose_repr: relative # abs or rel or delta
+
+env_runner:
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+
+dataset:
+  _target_: diffusion_policy.dataset.umi_dataset.UmiDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  cache_dir: null
+  pose_repr: *pose_repr
+  action_padding: False
+  temporally_independent_normalization: False
+  repeat_frame_prob: 0.0
+  max_duration: null
+  seed: 42
+  val_ratio: 0.05

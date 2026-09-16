@@ -1,0 +1,47 @@
+architecture: polytouch
+head: unet1d
+objective: diffusion
+
+conditioner:
+  d_embed: 256
+  fusion: cross_attention
+  fusion_kwargs:
+    n_blocks: 6
+    n_heads: 12
+    bidirectional_rounds: 1
+  sensors:
+    camera0_rgb:
+      modality: rgb
+      encoder: clip_vit
+      encoder_kwargs:
+        pretrained: true
+    finger_rgb:
+      modality: tactile
+      encoder: t3
+      encoder_kwargs:
+        pretrained: true
+        t3_size: small
+        t3_sensor: svelte
+        hf_repo: alanz-mit/FoundationTactile
+    mic_0:
+      modality: audio
+      encoder: ast
+    robot0_eef_pos:
+      modality: proprio
+      encoder: proprio_mlp
+      dim: 3
+    robot0_eef_rot_axis_angle:
+      modality: proprio
+      encoder: proprio_mlp
+      dim: 6
+    robot0_gripper_width:
+      modality: proprio
+      encoder: proprio_mlp
+      dim: 1
+    robot0_eef_rot_axis_angle_wrt_start:
+      modality: proprio
+      encoder: proprio_mlp
+      dim: 6
+
+head_kwargs:
+  down_dims: [256, 512, 1024]

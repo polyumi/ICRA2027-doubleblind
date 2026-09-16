@@ -1,0 +1,103 @@
+
+# calibrates the transforms between the pose the optitrack reports
+# for the gripper, and the actual gripper.
+# necessary because Motive just picks the centroid of the markers as the 
+# origin of the rigid body frame--I have no control over it.
+
+# gripper base frame (due to how the optitrack is set up, and how I oriented the gripper to calibrate it):
+# x - forward
+# y - up
+# z - right
+
+# gopro frame:
+# x - right
+# y - down
+# z - forward
+
+# world frame:
+# x - right
+# y - forward
+# z - up
+
+# gripper base origin is at the center of the front edge of the gripper base.
+# calibrated by placing gripper base origin at optitrack origin.
+T_gripper_base_to_optitrack_rigid_body:
+  translation: [-0.071377, 0.17301, 0.048436] # meters
+  rotation: [ -0.267789, 0.958962, -0.000048, 0.093174 ] # quaternion
+
+# measured approximately irl + in onshape
+T_gripper_base_to_gopro:
+  translation: [-.049, 0.21, 0.0] # meters
+  # rotation: [ 0, 0, -0.7071068, 0.7071068 ] # quaternion
+  # rotation: [ 0.5, -0.5, 0.5, -0.5 ]
+  rotation: [ 0.7071068, 0, 0.7071068, 0 ]
+
+# The canonical body frame every exported pose is expressed at (preprocessing step 5).
+# in other words, this is the "pose" that the model knows about.
+# This transform goes from the gopro's camera frame in optical coordinates (exactly as outputted by
+# ORB-SLAM3) to gripper fingertips, as measured in the PolyUMI CAD assembly.
+# To be more specific:
+# - "camera frame" origin is measured on the CAD as the centerpoint of the GoPro lens faceplate, 
+#   with a 5mm fudge factor added to guess at where the sensor plane is (.254->.259)
+# - "gripper fingertips" is the midpoint between the two gripper fingertips, on the plane of the upper 
+#   surface of the fingers. In other words, if you close the gripper all the way, it's the point where the
+#   two fingertips meet that is coplanar with the QR codes.
+
+# I picked this canonical body frame because A. it follows roughly UMI's approach
+# and B. this is where the gripper interacts with objects, and this may make the model learn
+# to reason about contact & manipulation more easily since it can sort of work directly in manipulanda space,
+# rather than have to learn about the geometry of the gripper.
+
+# the CAD is designed such that this geometric relationship is the same for both the gripper
+# and the franka end effector.
+#
+# The .259 is corroborated independently of this CAD read, via the FR3 chain: franka_description
+# puts the finger carriage plane 0.0584 m out from fr3_hand, and the fingertips are 0.1985 m past
+# that (nuc/tcp_calib.py) = 0.2569 m. The two agree to ~2 mm, which says the sensor plane sits
+# essentially in the fr3_hand/flange plane. Don't "fix" this number without redoing that check —
+# it has been mistaken for a typo once already.
+#
+# The y was 0.014 until 2026-08-06, which was wrong: it implied the sensor sat only 33.6 mm above
+# the fr3_hand x-midline, roughly flush with the top of the hand shell, when the bracket clearly
+# lifts it further. 0.07069 puts it ~90 mm up, matching the CAD. Every pose exported before that
+# date is on a body frame ~57 mm off along this axis; inference support for those checkpoints was
+# dropped on 2026-08-09 rather than carried, so anything exported earlier must be re-exported.
+T_gopro_to_fingertip:
+  translation: [0.0, 0.07069, 0.259] # meters — gopro frame: x right, y down, z forward
+  # we'll work in optical coordinates (ie z out, x right, y down); no reason to change from SLAM output
+  rotation: [ 0.0, 0.0, 0.0, 1.0 ] # quaternion (xyzw)
+
+
+T_optitrack_to_world:
+  translation: [0.0, 0.0, 0.0] # meters
+  # for z along the floor
+  rotation: [ 0.5, 0.5, 0.5, -0.5 ]
+  # rotation: [0, 0, 0, 1] # quaternion
+
+gripper_fingers:
+  # The ArUco finger-tag separation at the fully-open and fully-closed states
+  # of the handheld PolyUMI gripper.
+  #
+  # closed_mm is LOAD-BEARING: the DP exporter subtracts it from every width so that exported
+  # `robot0_gripper_width` is metres of opening from fully closed rather than raw tag separation
+  # (UMI's convention — the same subtraction their upstream repo does in
+  # scripts_slam_pipeline/06_generate_dataset_plan.py). Changing it
+  # changes the meaning of every dataset exported afterwards, and mixing conventions in one
+  # training run is silent, so re-export everything together. Each buffer records the value it was
+  # built with as meta.attrs['gripper_closed_width_m'].
+  #
+  # Derive both with:  pingest calibrate-gripper --scene <a scene where the gripper fully opens
+  # and closes several times, held at each extreme for a few seconds>
+  closed_mm: 44.56 # mm between the finger tags when closed
+  open_mm: 132.33 # mm between the finger tags when open
+
+# ArUco markers placed on the gripper fingers, used by the gripper-width
+# preprocessing step (aruco_step.py) to derive a 1DOF gripper width from
+# the GoPro video. IDs / size follow the UMI convention (left=0, right=1, 16mm).
+aruco_finger_tags:
+  dictionary: DICT_4X4_50
+  left_id: 0
+  right_id: 1
+  marker_size_m: 0.016
+  nominal_z_m: 0.072    # expected depth of finger tags from GoPro (metres)
+  z_tolerance_m: 0.008  # acceptance window around nominal_z (metres)

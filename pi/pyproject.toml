@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polyumi_pi"
+version = "0.1.0"
+description = "Raspberry Pi streaming client for the PolyUMI multimodal learning platform"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.135.1",
+    "numpy>=2.4.3",
+    "open-gopro",
+    "opencv-python-headless>=4.12.0.88",
+    "polyumi_pi_msgs",
+    "protobuf>=6,<7",
+    "pyzmq>=27.1.0",
+    "rich>=14.3.3",
+    "sounddevice>=0.5.5",
+    "typer>=0.24.1",
+    "uvicorn>=0.41.0",
+]
+
+[project.optional-dependencies]
+# Raspberry Pi hardware-only dependencies. These are required to run the full
+# polyumi-pi app on the Pi (imported by cam_streamer/led_manager/raspi_driver),
+# but not by the unit tests or the gopro bringup script. Install with
+# `polyumi_pi[pi]` on the Pi.
+#
+# NOTE: gpiozero and lgpio are deliberately NOT listed here. On the Pi they are
+# provided by apt (python3-gpiozero / python3-lgpio) and picked up through the
+# venv's --system-site-packages. Listing lgpio as a pip dep forces uv to build
+# it from its sdist (there is no binary wheel), which needs swig and fails on the
+# Pi. Only rpi-hardware-pwm is pip-installed, since it has no apt package.
+pi = [
+    "rpi-hardware-pwm>=0.3.1",
+]
+
+[project.scripts]
+polyumi-pi = "polyumi_pi.main:app"
+
+[dependency-groups]
+# this should be installed using apt on the Pi, not pip
+# but for development convenience we can install it in the
+# PC virtualenv here with uv
+dev = [
+    "picamera2",
+    "pytest>=9.0.2",
+    ]
+
+[tool.uv.sources]
+open-gopro = { git = "https://github.com/anon-authors/OpenGoPro", branch = "pi-trixie-fix", subdirectory = "demos/python/sdk_wireless_camera_control" }
+polyumi_pi_msgs = { path = "../ros2_ws/src/polyumi_pi_msgs", editable = true }

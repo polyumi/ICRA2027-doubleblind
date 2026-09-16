@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# deploy_server.sh - Push this working copy to the GPU box, and build what runs there.
+# Usage: ./deploy_server.sh [ssh_hostname] [remote_repo_path]
+#
+# polyumi-server runs BOTH halves of inference — the ROS client (policy_client_node, the camera, Foxglove)
+# and the policy server (serve_policy.sh, the diffusion-policy fork in Docker) — plus training.
+# So it gets the whole tree rather than a curated subset, and the three build steps that a plain
+# rsync leaves stale.
+#
+# Companion to deploy.sh (the Pi) and fr3_session.sh's rsync of nuc/ (the NUC). Same idea: the
+# remote runs THIS working copy, not whatever it last had. fr3_session.sh calls this; run it by
+# hand when you only want to push code for a training run.
+
+set -euo pipefail
+
+HOST="${1:-${ROS_SSH_HOST:-polyumi-server}}"
+# Left unexpanded so the REMOTE shell resolves the tilde against its own $HOME.
+REPO="${2:-${ROS_REPO:-~/repos/PolyUMI}}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "==> Syncing repo to ${HOST}:${REPO} ..."
+# --delete, so a file removed here is removed there — a stale serve_obs.py on polyumi-server is the kind of
+# thing that produces a plausible-looking rollout against last week's frame convention.
+#
+# data/, recordings/ and wandb/ are polyumi-server's OUTPUT — data/ holds dp_outputs, i.e. every checkpoint.
+# rsync protects excluded paths from --delete, which is the only reason they survive this.
+# They are ANCHORED with a leading slash: an unanchored 'data/' matches at every depth, which
+# silently drops a fork's own package directory (external/polyumi_vista_policy/vista/data/) and
+# leaves the remote building against a tree missing files that exist here.
+# external/ORB_SLAM3_PolyUMI is 2 GB of ingest-side C++ that nothing on polyumi-server runs.
+# external/polyumi_vista_policy is hand-managed ON polyumi-server: the checkpoints under data/dp_outputs/
+# were trained against a working copy that is not any commit of the fork, and overwriting it makes
+# them unloadable. The dp fork under external/ DOES ship.
+
+# An uninitialised submodule is an EMPTY directory here, and --delete would erase the remote's
+# copy of it — silently, since rsync reports nothing for a directory it merely empties. Refuse
+# rather than ship the deletion; `git submodule update --init <path>` is the fix.
+for d in "${HERE}"/external/*/; do
+    case "${d}" in
+        */ORB_SLAM3_PolyUMI/ | */polyumi_vista_policy/) continue ;;
+    esac
+    if [ -z "$(ls -A "${d}")" ]; then
+        echo "error: ${d} is empty (uninitialised submodule); --delete would wipe it on ${HOST}." >&2
+        echo "       run: git submodule update --init ${d#"${HERE}"/}" >&2
+        exit 1
+    fi
+done
+
+rsync -a --delete --mkpath \
+    --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.egg-info/' \
+    --exclude='.venv/' --exclude='/recordings/' --exclude='/data/' --exclude='/wandb/' \
+    --exclude='external/ORB_SLAM3_PolyUMI/' --exclude='external/polyumi_vista_policy/' \
+    --exclude='ros2_ws/build/' --exclude='ros2_ws/install/' --exclude='ros2_ws/log/' \
+    "${HERE}/" "${HOST}:${REPO}/"
+
+# Import-check the fork rather than just listing files: serve_obs is the module both entrypoints
+# load, so a partial rsync shows up here instead of as a failed rollout later.
+ssh "${HOST}" "
+    set -euo pipefail
+    test -f ${REPO}/external/polyumi_diffusion_policy/serve_policy.py
+    test -f ${REPO}/external/polyumi_diffusion_policy/serve_obs.py
+    test -f ${REPO}/inference_server/polyumi_inference/wire.py
+    test -f ${REPO}/docker/polyumi_inference.Dockerfile
+    echo '    fork + polyumi_inference present'
+    # Not synced (see the exclude above) — this only confirms polyumi-server's hand-managed copy is
+    # intact, which is worth catching now rather than as a stage-1 build failure 20 minutes in. Soft
+    # check: polyumi-server's vista dir can be a stub (no Dockerfile/train_day0suite.sh yet), and
+    # that must not abort a deploy that has nothing to do with vista.
+    if [ -d ${REPO}/external/polyumi_vista_policy ]; then
+        if [ -f ${REPO}/external/polyumi_vista_policy/Dockerfile ] && \
+           [ -f ${REPO}/external/polyumi_vista_policy/scripts/train_day0suite.sh ]; then
+            echo '    vista fork present'
+        else
+            echo '    vista fork present but stub-only (no Dockerfile/train_day0suite.sh) — skipping'
+        fi
+    fi
+"
+
+# colcon COPIES sources into install/, so an edited node keeps running the old code until you
+# rebuild — no error, no clue. VIRTUAL_ENV unset so the build uses the system python (see CLAUDE.md).
+# --packages-up-to, not --packages-select: polyumi_ros2 depends on franka_streaming_impedance_client
+# (symlinked into ros2_ws/src/ per CLAUDE.md's impedance-controller section), and --packages-select
+# builds ONLY the named package, silently leaving that dependency at whatever install/ already had.
+echo "==> Building polyumi_ros2 on ${HOST} ..."
+ssh -o ConnectTimeout=10 "${HOST}" \
+    "unset VIRTUAL_ENV; cd ${REPO}/ros2_ws && source /opt/ros/kilted/setup.bash \
+     && colcon build --packages-up-to polyumi_ros2"
+
+# policy_client_node imports polyumi_inference directly (CLAUDE.md, "The Inference Protocol Lives
+# in One Library"). --no-deps so numpy/requests keep coming from apt via rosdep rather than pip
+# shadowing the system numpy the rest of the ROS stack links against.
+echo "==> Installing polyumi_inference for the ROS node on ${HOST} ..."
+ssh -o ConnectTimeout=10 "${HOST}" \
+    "cd ${REPO} && pip install --user --break-system-packages --no-deps -e inference_server/"
+
+echo "==> Done. Next:"
+echo "      ./fr3_session.sh                                          # inference"
+echo "      ssh ${HOST} 'cd ${REPO} && ./train_policy.sh'             # training"

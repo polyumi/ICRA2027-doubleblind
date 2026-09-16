@@ -1,0 +1,51 @@
+# Qformer (ours): CNN stems + Q-Former + DiT head + flow matching
+architecture: qformer
+head: dit
+objective: flow_matching
+
+conditioner:
+  d_embed: 384
+  fusion: qformer
+  fusion_kwargs:
+    n_queries: 128
+    n_layers: 6
+    n_heads: 8
+    n_cross_attn: 3
+    mlp_ratio: 2
+  sensors:
+    camera0_rgb:
+      modality: rgb
+      encoder: vision_cnn
+    finger_rgb:
+      modality: tactile
+      encoder: tactile_cnn
+    mic_0:
+      modality: audio
+      encoder: audio_cnn
+    robot0_eef_pos:
+      modality: proprio
+      encoder: proprio_mlp
+      dim: 3
+    robot0_eef_rot_axis_angle:
+      modality: proprio
+      encoder: proprio_mlp
+      dim: 6
+    robot0_gripper_width:
+      modality: proprio
+      encoder: proprio_mlp
+      dim: 1
+    robot0_eef_rot_axis_angle_wrt_start:
+      modality: proprio
+      encoder: proprio_mlp
+      dim: 6
+
+head_kwargs:
+  d_model: 384
+  n_layers: 4
+  n_heads: 8
+  mlp_ratio: 4
+  adaln_zero: true
+
+objective_kwargs:
+  fm_num_inference_steps: 10
+  num_inference_steps: 10

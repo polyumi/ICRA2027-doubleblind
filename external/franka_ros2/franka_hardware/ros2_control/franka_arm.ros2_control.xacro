@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:include filename="$(find franka_hardware)/ros2_control/franka_ros2_control_macros.xacro"/>
+
+  <xacro:macro name="franka_arm_ros2_control"
+    params="robot_type
+                 include_effort_command:=true
+                 include_finger_joint:=false
+                 arm_prefix:=''
+                 is_async:=false
+                 thread_priority:=98
+                 **hardware_plugin">
+
+    <ros2_control name="${arm_prefix}FrankaHardwareInterface" type="system" is_async="${is_async}">
+      <xacro:if value="${is_async}">
+        <properties>
+          <async scheduling_policy="detached" print_warnings="true" thread_priority="${thread_priority}"
+            manage_overruns="false"/>
+        </properties>
+      </xacro:if>
+      <hardware>
+        <param name="version">1.1.0</param>
+        <param name="robot_type">${robot_type}</param>
+        <param name="prefix">${arm_prefix}</param>
+        <xacro:insert_block name="hardware_plugin"/>
+      </hardware>
+
+      <!-- Per-arm interfaces: joints, finger, cartesian velocity, cartesian pose, elbow, sensor -->
+      <xacro:configure_arm_interfaces
+          joint_prefix="${arm_prefix}${robot_type}"
+          gpio_prefix="${arm_prefix}"
+          include_effort_command="${include_effort_command}"
+          include_finger_joint="${include_finger_joint}"
+          include_elbow="1"
+          include_cartesian_pose="1"
+          include_sensor="1"
+          sensor_name="${arm_prefix}${robot_type}_tcp"/>
+
+    </ros2_control>
+
+  </xacro:macro>
+</robot>

@@ -1,0 +1,33 @@
+repositories:
+  franka_description:
+    type: git
+    url: https://github.com/frankarobotics/franka_description.git
+    version: 2.9.0
+  libfranka:
+    type: git
+    url: https://github.com/frankarobotics/libfranka.git
+    version: 0.20.5
+  gz_ros2_control:
+    type: git
+    url: https://github.com/ros-controls/gz_ros2_control.git
+    version: jazzy
+  olvx_descriptions_module:
+    type: git
+    url: https://github.com/olive-robotics/olvx_descriptions_module.git
+    version: main
+  ros2_robotiq_gripper:
+    type: git
+    url: https://github.com/PickNikRobotics/ros2_robotiq_gripper.git
+    version: main
+  serial:
+    type: git
+    url: https://github.com/tylerjw/serial.git
+    version: ros2
+  ros2_control:
+    type: git
+    url: https://github.com/ros-controls/ros2_control.git
+    version: jazzy
+  zed_description:
+    type: git
+    url: https://github.com/stereolabs/zed-ros2-description.git
+    version: 0.1.3

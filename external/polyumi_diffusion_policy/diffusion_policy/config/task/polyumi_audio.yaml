@@ -1,0 +1,109 @@
+# PolyUMI plus the contact mic only (no finger camera).
+#
+# Derived from task/polyumi.yaml, which stays untouched so existing visuomotor runs are
+# unaffected. FULL action space (10-dim pose + gripper), so this trains on any polyumi
+# export -- board, gears or lightbulb -- unlike the gripper-only slip task configs.
+#
+# The *_obs_latency values are UMI's and are INERT while dataset_frequeny: 0.
+name: polyumi_audio
+
+camera_obs_latency: 0.125
+robot_obs_latency: 0.0001
+gripper_obs_latency: 0.02
+dataset_frequeny: 0 #29.97
+obs_down_sample_steps: 3 # 29.97/3 ~= 10 Hz, matching the ROS control loop
+
+low_dim_obs_horizon: 2
+img_obs_horizon: 2
+action_horizon: 16
+ignore_proprioception: False
+
+# One mic_0 row is 536 samples at 16 kHz = 33.5 ms, so 10 rows spans ~335 ms of contact history.
+# Must match n_audio_rows in the ROS client's inference.yaml and the checkpoint's
+# audio_obs_horizon; the three move together.
+audio_obs_horizon: 10
+
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim, audio
+  obs:
+    camera0_rgb:
+      shape: [3, 224, 224]
+      horizon: ${task.img_obs_horizon} # int
+      latency_steps: 0 # float
+      down_sample_steps: ${task.obs_down_sample_steps} # int
+      type: rgb
+      ignore_by_policy: False
+    mic_0:
+      # Raw 16 kHz contact-mic waveform, one row per exported step, exactly as
+      # ingest/polyumi_ingest/export/dp/audio.py writes it. The encoder concatenates the rows
+      # before its STFT, so this shape is per-row and the window length is the horizon above.
+      shape: [536]
+      horizon: ${task.audio_obs_horizon} # int
+      latency_steps: 0 # float
+      down_sample_steps: 1 # int -- rows are already on the step grid
+      type: audio
+      n_mels: 64
+      out_dim: 128
+      sample_rate: 16000
+    robot0_eef_pos:
+      shape: [3]
+      horizon: ${task.low_dim_obs_horizon} # int
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+    robot0_eef_rot_axis_angle:
+      raw_shape: [3]
+      shape: [6]
+      horizon: ${task.low_dim_obs_horizon} # int
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      type: low_dim
+      rotation_rep: rotation_6d
+      ignore_by_policy: ${task.ignore_proprioception}
+    robot0_gripper_width:
+      shape: [1]
+      horizon: ${task.low_dim_obs_horizon} # int
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.gripper_obs_latency}) * ${task.dataset_frequeny}'} # float
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+
+    # pose with respect to episode start
+    robot0_eef_rot_axis_angle_wrt_start:
+      raw_shape: [3]
+      shape: [6]
+      horizon: ${task.low_dim_obs_horizon} # int
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      type: low_dim
+      ignore_by_policy: ${task.ignore_proprioception}
+  action:
+    shape: [10]
+    horizon: ${task.action_horizon}
+    latency_steps: 0 # float
+    down_sample_steps: ${task.obs_down_sample_steps} # int
+    rotation_rep: rotation_6d
+
+task_name: &task_name polyumi_audio
+# Bind-mounted into the container by the run wrapper; override with task.dataset_path=... .
+dataset_path: /data/dataset.zarr.zip
+pose_repr: &pose_repr
+  obs_pose_repr: relative # abs or rel
+  action_pose_repr: relative # abs or rel or delta
+
+env_runner:
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+
+dataset:
+  _target_: diffusion_policy.dataset.umi_dataset.UmiDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  cache_dir: null
+  pose_repr: *pose_repr
+  action_padding: False
+  temporally_independent_normalization: False
+  repeat_frame_prob: 0.0
+  max_duration: null
+  seed: 42
+  val_ratio: 0.05

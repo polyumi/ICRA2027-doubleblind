@@ -1,0 +1,297 @@
+<div id="detail-body"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if detail.kind == 'empty' or detail is none %}
+  <p class="placeholder">Select a row to inspect it.</p>
+
+  {% elif detail.kind == 'task' %}
+  <h2>{{ detail.name }}</h2>
+  {% if detail.pseudo %}
+  <p class="muted">Virtual grouping — not a real task.</p>
+  {% else %}
+  <dl>
+    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+  </dl>
+  <form class="rename-task-form" method="post" action="/tasks/{{ detail.id }}/rename">
+    <input type="text" name="new_name" value="{{ detail.name }}" required />
+    <button type="submit">Rename</button>
+  </form>
+  <form class="notes-form" hx-post="/tasks/{{ detail.id }}/description" hx-target="#detail-body" hx-swap="outerHTML">
+    <label for="task-description">Description</label>
+    <textarea id="task-description" name="description" rows="3" placeholder="Add description…">{{ detail.description or '' }}</textarea>
+    <button type="submit">Save description</button>
+  </form>
+  {% endif %}
+  <dl>
+    <dt>Scenes</dt><dd>{{ detail.scene_count }}</dd>
+    <dt>Episodes</dt><dd>{{ detail.usable_episode_count }} usable / {{ detail.episode_count }} total</dd>
+  </dl>
+
+  {% elif detail.kind == 'scene' %}
+  {# Lets the topbar's Rescan button say which scene is on screen (hx-include), so a rescan can
+     swap this pane and the Episodes column back in with what it just re-read from disk. The
+     server tracks no selection state; this is the whole mechanism. #}
+  <input type="hidden" id="selected-scene-id" name="selected_scene_id" value="{{ detail.scene_id }}" />
+  <div class="scene-detail-layout">
+    <div class="scene-detail-text">
+      <h2>{{ detail.name }}</h2>
+      <dl>
+        <dt>Task</dt><dd>{{ detail.task_name or '(unassigned)' }}</dd>
+        <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
+        <dt>Archived</dt><dd>{{ 'yes' if detail.archived else 'no' }}</dd>
+        <dt title="Episodes still usable (neither marked unusable nor auto-excluded), episodes, and all sessions including mapping passes">Sessions</dt>
+        <dd>{{ detail.n_usable_episodes }} usable / {{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
+        <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+        <dt title="Wall clock from the start of the scene to the end of its last session — the dead time between episodes included">Scene time</dt>
+        <dd>{{ detail.scene_seconds | duration }}</dd>
+        <dt title="Summed length of this scene's episodes; 'usable' drops the ones an export would skip. Mapping passes are not counted, so their time falls into the gap from scene time">Episode time</dt>
+        <dd>
+          {{ detail.episode_seconds | duration }} ({{ detail.usable_episode_seconds | duration }} usable)
+          {% if detail.episode_frac is not none %}<span class="muted">— {{ '%.0f%%' % (detail.episode_frac * 100) }} of scene</span>{% endif %}
+        </dd>
+        <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
+      </dl>
+      <form class="assign-task-form" method="post" action="/scenes/{{ detail.scene_id }}/task">
+        <select name="task_id">
+          <option value=""{% if not detail.task_id %} selected{% endif %}>(unassigned)</option>
+          {% for t in all_tasks %}
+          <option value="{{ t.id }}"{% if detail.task_id == t.id %} selected{% endif %}>{{ t.name }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Assign</button>
+      </form>
+      <button hx-post="/dataset-draft/add/{{ detail.scene_id }}" hx-swap="none">Add to dataset</button>
+      <form class="notes-form" hx-post="/scenes/{{ detail.scene_id }}/notes" hx-target="#detail-body" hx-swap="outerHTML">
+        <label for="scene-notes">Notes</label>
+        <textarea id="scene-notes" name="notes" rows="3" placeholder="Add notes…">{{ detail.notes or '' }}</textarea>
+        <button type="submit">Save notes</button>
+      </form>
+      {# oob is forced false, and {% include %} inheriting this pane's context is exactly why:
+         on the rescan path the pane itself is rendered oob=True, and a nested out-of-band swap
+         would be swapped twice, to two places. Only this partial needs the dance — it is the
+         one that is *sometimes* an out-of-band swap (from the pp poll). #}
+      {% with oob = False %}{% include "_scene_quality.html" %}{% endwith %}
+      <h3>Provenance</h3>
+      <dl>
+        <dt title="Commit of polyumi running on the Pi when these sessions were recorded (metadata.json polyumi_version)">Recorded by</dt>
+        <dd>
+          {% if detail.provenance.pi_versions %}
+          {% for v in detail.provenance.pi_versions %}
+          <span class="mono" title="{{ v }}">{{ v | short_sha or v }}</span>{% if not loop.last %}, {% endif %}
+          {% endfor %}
+          {% if detail.provenance.pi_versions | length > 1 %}
+          <span class="badge warn" title="Sessions in this scene were recorded under different Pi deploys">mixed</span>
+          {% endif %}
+          {% else %}—{% endif %}
+        </dd>
+        <dt title="Commit that built scene.zarr (root git_sha attr). Individual preprocessing steps may have re-run later — see the pipeline list.">pzarr built by</dt>
+        <dd>
+          {% if detail.provenance.pzarr_git_sha | short_sha %}
+          <span class="mono" title="{{ detail.provenance.pzarr_git_sha }}">{{ detail.provenance.pzarr_git_sha | short_sha }}</span>
+          {% else %}—{% endif %}
+        </dd>
+        <dt>Ingest version</dt>
+        <dd>{{ detail.provenance.pipeline_version or '—' }}</dd>
+        <dt>pzarr built</dt>
+        <dd>{{ detail.provenance.pzarr_created_at or '—' }}</dd>
+      </dl>
+      {% if can_delete %}
+      <form
+        class="delete-scene-form"
+        method="post"
+        action="/scenes/{{ detail.scene_id }}/delete"
+        onsubmit="return confirm('Permanently delete {{ detail.name }} — {{ detail.n_sessions }} session(s) — from local disk?{% if detail.n_datasets %} It is named by {{ detail.n_datasets }} dataset manifest(s); those exports keep their own copy of the data but can no longer be rebuilt from this scene.{% endif %} Recordings cannot be regenerated and this cannot be undone. If it is still on the Pi, Fetch from Pi will pull it down again.')"
+      >
+        <button type="submit" class="warn">Delete scene…</button>
+      </form>
+      {% endif %}
+      {% if detail.conflicts %}
+      <div class="conflict-box">
+        <strong>⚠ Task conflicts</strong>
+        <p class="muted">These sessions' own metadata.json task disagrees with the scene's canonical task.</p>
+        <ul>
+          {% for c in detail.conflicts %}
+          <li>{{ c.session_id[:8] }}… — recorded as <em>{{ c.task_meta }}</em></li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </div>
+    {% include "_pp_panel.html" %}
+  </div>
+
+  {% elif detail.kind == 'session' %}
+  <div class="session-detail-layout">
+    <div class="session-detail-text">
+      <h2>{{ detail.name }}</h2>
+      <dl>
+        <dt>Type</dt><dd>{{ detail.session_type }}</dd>
+        <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
+        <dt>Scene</dt><dd>{{ detail.scene_id }}</dd>
+        <dt>Robot</dt><dd>{{ detail.robot or '—' }}</dd>
+        <dt>Recorded task</dt><dd>{{ detail.task_meta or '—' }}</dd>
+        <dt>Duration</dt><dd>{{ '%.1f s' % detail.duration_s if detail.duration_s is not none else '—' }}</dd>
+        <dt>GoPro fps</dt><dd>{{ '%.1f' % detail.gopro_fps if detail.gopro_fps is not none else '—' }}</dd>
+        <dt>Video frames</dt><dd>
+          {{ detail.n_video_frames if detail.n_video_frames is not none else '—' }}
+          {% if detail.video_dropped_frames %}<span class="warn">({{ detail.video_dropped_frames }} dropped)</span>{% endif %}
+        </dd>
+        <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+        {% if detail.session_type == 'EPISODE' %}
+        <dt>Usable</dt>
+        <dd>
+          {% if detail.unusable %}<span class="badge warn">unusable — excluded from exports</span>
+          {% else %}yes{% endif %}
+        </dd>
+        {% endif %}
+      </dl>
+      {% if detail.session_type == 'EPISODE' %}
+      <button
+        id="unusable-toggle-btn"
+        hx-post="/sessions/{{ detail.session_id }}/{{ 'mark-usable' if detail.unusable else 'mark-unusable' }}"
+        hx-target="#detail-body"
+        hx-swap="outerHTML"
+        title="Shortcut: X"
+      >
+        {{ 'Mark usable' if detail.unusable else 'Mark unusable' }}
+      </button>
+      {% endif %}
+      {% if detail.session_type == 'EPISODE' %}
+      <form class="pose-source-form">
+        <label for="pose-source-select">DP export pose source</label>
+        <select
+          id="pose-source-select"
+          name="source"
+          hx-post="/sessions/{{ detail.session_id }}/pose-source"
+          hx-trigger="change"
+          hx-target="#detail-body"
+          hx-swap="outerHTML"
+        >
+          <option value="default" {% if not detail.pose_source_override %}selected{% endif %}>
+            Default{% if detail.available_pose_sources %} ({{ detail.available_pose_sources[0] }}){% endif %}
+          </option>
+          <option value="optitrack"
+            {% if detail.pose_source_override == 'optitrack' %}selected{% endif %}
+            {% if detail.available_pose_sources is not none and 'optitrack' not in detail.available_pose_sources %}disabled{% endif %}>
+            OptiTrack
+          </option>
+          <option value="slam"
+            {% if detail.pose_source_override == 'slam' %}selected{% endif %}
+            {% if detail.available_pose_sources is not none and 'slam' not in detail.available_pose_sources %}disabled{% endif %}>
+            SLAM
+          </option>
+        </select>
+        {% if detail.available_pose_sources is none %}
+        <p class="muted">Pose sources unknown until preprocessing step 5 (eef-pose) has run.</p>
+        {% endif %}
+      </form>
+      {% endif %}
+      <form class="notes-form" hx-post="/sessions/{{ detail.session_id }}/notes" hx-target="#detail-body" hx-swap="outerHTML">
+        <label for="session-notes">Notes</label>
+        <textarea id="session-notes" name="notes" rows="3" placeholder="Add notes…">{{ detail.notes or '' }}</textarea>
+        <button type="submit">Save notes</button>
+      </form>
+      {% if detail.slam %}
+      <h3>SLAM tracking quality</h3>
+      <dl>
+        <dt>Tracking ratio</dt>
+        <dd>
+          {{ '%.1f%%' % (detail.slam.tracking_ratio * 100) if detail.slam.tracking_ratio is not none else '—' }}
+          {% if detail.slam.low_quality %}<span class="badge warn">low</span>{% endif %}
+        </dd>
+        <dt>Frames lost</dt><dd>{{ detail.slam.n_frames_lost }} / {{ detail.slam.n_frames_total }}</dd>
+        <dt>Relocalizations</dt><dd>{{ detail.slam.n_relocalization_events }}</dd>
+        <dt>Max pose jump</dt>
+        <dd>{{ '%.1f cm' % (detail.slam.max_pose_jump_m * 100) if detail.slam.max_pose_jump_m is not none else '—' }}</dd>
+        {% if detail.slam.has_optitrack %}
+        <dt>OptiTrack</dt><dd>available — exempt from SLAM-based exclusion</dd>
+        {% endif %}
+      </dl>
+      {% if detail.slam.auto_unusable %}
+      <p class="muted">
+        <span class="badge warn">auto-unusable</span>
+        Excluded from dataset exports: {{ detail.slam.auto_unusable_reasons | join('; ') }}.
+        Thresholds live in <code>ingest/config/quality_thresholds.yaml</code>; this verdict is
+        recomputed on read, so changing them reclassifies without reprocessing.
+      </p>
+      {% endif %}
+      {% elif detail.pzarr_exists %}
+      <p class="muted">No SLAM results for this session yet (run <code>pingest pp 2</code>).</p>
+      {% endif %}
+      {% if detail.pzarr_streams %}
+      <h3>pzarr streams (episode {{ detail.pzarr_streams.episode_index }})</h3>
+      <table class="stream-table">
+        <thead>
+          <tr><th>Array</th><th>Shape</th><th>Rate</th><th>Timestamps</th></tr>
+        </thead>
+        <tbody>
+          {% for s in detail.pzarr_streams.streams %}
+          <tr>
+            <td>{{ s.label }}</td>
+            <td class="mono">{{ s.shape }}</td>
+            <td>{{ s.rate or '—' }}</td>
+            <td class="mono">{{ s.timestamps or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if detail.pzarr_streams.duration_s is not none %}
+      <p class="muted">
+        Episode span: {{ '%.3f' % detail.pzarr_streams.episode_start }} → {{ '%.3f' % detail.pzarr_streams.episode_end }} s
+        ({{ '%.2f' % detail.pzarr_streams.duration_s }} s)
+      </p>
+      {% endif %}
+      {% endif %}
+      <div class="mcap-actions">
+        {% if detail.pzarr_exists %}
+        <button
+          hx-post="/sessions/{{ detail.session_id }}/export-mcap"
+          hx-target="#detail-body"
+          hx-swap="outerHTML"
+          hx-indicator="#mcap-export-spin"
+        >
+          {{ 'Re-export MCAP' if detail.mcap_exists else 'Export to MCAP' }}
+        </button>
+        <span id="mcap-export-spin" class="htmx-indicator">exporting…</span>
+        {% else %}
+        <p class="muted">Build pzarr first (<code>pingest pp</code>) to enable MCAP export.</p>
+        {% endif %}
+        {% if detail.mcap_exists %}
+        <button hx-post="/sessions/{{ detail.session_id }}/open-foxglove" hx-swap="none">Open in Foxglove</button>
+        {% endif %}
+      </div>
+    </div>
+    <div class="session-detail-media">
+      <img class="detail-thumb" src="/sessions/{{ detail.session_id }}/thumbnail.jpg" alt="" onerror="this.remove()" />
+    </div>
+  </div>
+
+  {% elif detail.kind == 'dataset' %}
+  <h2>{{ detail.name }}</h2>
+  <dl>
+    <dt>Task</dt><dd>{{ detail.task_name or '—' }}</dd>
+    <dt>Episodes</dt><dd>{{ detail.n_episodes if detail.n_episodes is not none else '—' }}</dd>
+    <dt title="Wall clock across every member scene, dead time included">Scene time</dt>
+    <dd>{{ detail.scene_seconds | duration }}</dd>
+    <dt title="Recorded length of the sessions that made it into the buffer">Episode time</dt>
+    <dd>{{ detail.episode_seconds | duration }}</dd>
+    <dt title="Seconds actually in the buffer, after the pre-chirp trim and pose-gap segmentation">In dataset</dt>
+    <dd>{{ detail.exported_seconds | duration }}</dd>
+    <dt>Output</dt><dd class="mono">{{ detail.output_path or '—' }}</dd>
+    <dt>Manifest</dt><dd class="mono">{{ detail.manifest_path or '—' }}</dd>
+    <dt>PolyUMI version</dt><dd class="mono">{{ detail.polyumi_version or '—' }}</dd>
+    <dt>Exporter</dt><dd>{{ detail.exporter_type or '—' }}</dd>
+    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+  </dl>
+  <button hx-post="/dataset-draft/from-dataset/{{ detail.id }}" hx-swap="none">Duplicate into builder</button>
+  <h3>Member scenes</h3>
+  {% if detail.members %}
+  <ul>
+    {% for m in detail.members %}
+    <li>{{ m.name }} <span class="muted">({{ m.episodes }})</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No member scenes.</p>
+  {% endif %}
+
+  {% endif %}
+</div>

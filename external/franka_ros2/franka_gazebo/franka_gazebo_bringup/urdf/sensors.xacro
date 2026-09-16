@@ -1,0 +1,232 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+
+    <!-- Franka Gazebo IMU -->
+    <xacro:macro name="franka_gazebo_imu" params="link_target gz_topic rate:=100">
+        <gazebo reference="${link_target}">
+            <sensor name="${link_target}" type="imu">
+                <topic>${gz_topic}</topic>
+                <always_on>true</always_on>
+                <update_rate>${rate}</update_rate>
+                <visualize>false</visualize>
+                <plugin filename="libignition-gazebo-imu-system.so" name="ignition::gazebo::systems::Imu"/>
+            </sensor>
+      </gazebo>
+    </xacro:macro>
+
+    <!-- Franka Gazebo Arm IMUs -->
+    <!-- Every joint has an IMU on both sides of the pcb -->
+    <xacro:macro name="franka_gazebo_arm_imus" params="arm_prefix robot_type imu_side">
+        <xacro:property name="prefix" value="${arm_prefix + '_' if arm_prefix else '' + robot_type}"/>
+        <xacro:franka_gazebo_imu link_target="${prefix}_link0_accelerometer_${imu_side}" gz_topic="/${prefix}/imu/link0/${imu_side}"/>
+        <xacro:franka_gazebo_imu link_target="${prefix}_link1_accelerometer_${imu_side}" gz_topic="/${prefix}/imu/link1/${imu_side}"/>
+        <xacro:franka_gazebo_imu link_target="${prefix}_link2_accelerometer_${imu_side}" gz_topic="/${prefix}/imu/link2/${imu_side}"/>
+        <xacro:franka_gazebo_imu link_target="${prefix}_link3_accelerometer_${imu_side}" gz_topic="/${prefix}/imu/link3/${imu_side}"/>
+        <xacro:franka_gazebo_imu link_target="${prefix}_link4_accelerometer_${imu_side}" gz_topic="/${prefix}/imu/link4/${imu_side}"/>
+        <xacro:franka_gazebo_imu link_target="${prefix}_link5_accelerometer_${imu_side}" gz_topic="/${prefix}/imu/link5/${imu_side}"/>
+    </xacro:macro>
+
+    <xacro:macro name="franka_gazebo_camera" params="link_reference sensor_name gz_topic
+                 rate:=30 hfov:=1.047 width:=640 height:=480 format:=R8G8B8
+                 clip_near:=0.1 clip_far:=100.0 visualize:=true">
+        <gazebo reference="${link_reference}">
+            <sensor name="${sensor_name}" type="camera">
+                <pose>0 0 0 0 0 0</pose>
+                <topic>${gz_topic}</topic>
+                <update_rate>${rate}</update_rate>
+                <camera>
+                    <horizontal_fov>${hfov}</horizontal_fov>
+                    <image>
+                        <width>${width}</width>
+                        <height>${height}</height>
+                        <format>${format}</format>
+                    </image>
+                    <clip>
+                        <near>${clip_near}</near>
+                        <far>${clip_far}</far>
+                    </clip>
+                </camera>
+                <always_on>true</always_on>
+                <visualize>${visualize}</visualize>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+    <!-- ================= LIDAR MACRO ================= -->
+
+    <xacro:macro name="franka_gazebo_lidar" params="link_reference sensor_name ros_topic
+                 update_rate:=50.0 min_angle:='${radians(-45)}' max_angle:='${radians(225)}'
+                 min_range:=0.05 max_range:=10.0 max_beams:=500
+                 gaussian_noise:=0.006">
+        <plugin
+          filename="gz-sim-sensors-system"
+          name="gz::sim::systems::Sensors">
+          <render_engine>ogre2</render_engine>
+        </plugin>
+        <gazebo reference="${link_reference}">
+            <material value="Gazebo/Yellow" />
+            <sensor name="${sensor_name}" type="gpu_lidar">
+                <topic>${ros_topic}</topic>
+                <update_rate>${update_rate}</update_rate>
+                <gz_frame_id>${link_reference}</gz_frame_id>
+                <lidar>
+                    <scan>
+                        <horizontal>
+                            <samples>${max_beams}</samples>
+                            <resolution>1</resolution>
+                            <min_angle>${min_angle}</min_angle>
+                            <max_angle>${max_angle}</max_angle>
+                        </horizontal>
+                        <vertical>
+                            <samples>16</samples>
+                            <resolution>1</resolution>
+                            <min_angle>-0.261799</min_angle>
+                            <max_angle>0.261799</max_angle>
+                        </vertical>
+                    </scan>
+                    <range>
+                        <min>${min_range}</min>
+                        <max>${max_range}</max>
+                        <resolution>0.01</resolution>
+                    </range>
+                    <noise>
+                        <type>gaussian</type>
+                        <mean>0.0</mean>
+                        <stddev>${gaussian_noise}</stddev>
+                    </noise>
+                </lidar>
+                <visualize>true</visualize>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+    <!-- ================= BODY IMU MACRO ================= -->
+
+    <xacro:macro name="franka_gazebo_body_imu" params="link_reference gz_topic rate:=100
+                 gyro_stddev:=0.009 accel_stddev:=0.021">
+        <gazebo reference="${link_reference}">
+            <sensor name="imu_sensor" type="imu">
+                <topic>${gz_topic}</topic>
+                <update_rate>${rate}</update_rate>
+                <always_on>true</always_on>
+                <imu>
+                    <angular_velocity>
+                        <x><noise type="gaussian"><mean>0</mean><stddev>${gyro_stddev}</stddev></noise></x>
+                        <y><noise type="gaussian"><mean>0</mean><stddev>${gyro_stddev}</stddev></noise></y>
+                        <z><noise type="gaussian"><mean>0</mean><stddev>${gyro_stddev}</stddev></noise></z>
+                    </angular_velocity>
+                    <linear_acceleration>
+                        <x><noise type="gaussian"><mean>0</mean><stddev>${accel_stddev}</stddev></noise></x>
+                        <y><noise type="gaussian"><mean>0</mean><stddev>${accel_stddev}</stddev></noise></y>
+                        <z><noise type="gaussian"><mean>0</mean><stddev>${accel_stddev}</stddev></noise></z>
+                    </linear_acceleration>
+                </imu>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+    <!-- ================= D405 REALSENSE CAMERA MACRO ================= -->
+
+    <xacro:macro name="franka_gazebo_d405" params="link_reference sensor_name gz_topic
+                 rate:=30 hfov:=1.047 width:=640 height:=480 format:=R8G8B8
+                 clip_near:=0.1 clip_far:=100.0 visualize:=true">
+        <gazebo reference="${link_reference}">
+            <sensor name="${sensor_name}" type="camera">
+                <pose>0 0 0 0 0 0</pose>
+                <topic>${gz_topic}</topic>
+                <update_rate>${rate}</update_rate>
+                <camera>
+                    <horizontal_fov>${hfov}</horizontal_fov>
+                    <image>
+                        <width>${width}</width>
+                        <height>${height}</height>
+                        <format>${format}</format>
+                    </image>
+                    <clip>
+                        <near>${clip_near}</near>
+                        <far>${clip_far}</far>
+                    </clip>
+                </camera>
+                <always_on>true</always_on>
+                <visualize>${visualize}</visualize>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+    <!-- ================= ZED CAMERA MACRO ================= -->
+
+    <xacro:macro name="franka_gazebo_zed" params="link_reference sensor_name gz_topic
+                 rate:=30 hfov:=1.5708 width:=672 height:=376 format:=R8G8B8
+                 clip_near:=0.1 clip_far:=100.0 visualize:=true">
+        <gazebo reference="${link_reference}">
+            <sensor name="${sensor_name}" type="camera">
+                <pose>0 0 0 0 0 0</pose>
+                <topic>${gz_topic}</topic>
+                <update_rate>${rate}</update_rate>
+                <camera>
+                    <horizontal_fov>${hfov}</horizontal_fov>
+                    <image>
+                        <width>${width}</width>
+                        <height>${height}</height>
+                        <format>${format}</format>
+                    </image>
+                    <clip>
+                        <near>${clip_near}</near>
+                        <far>${clip_far}</far>
+                    </clip>
+                </camera>
+                <always_on>true</always_on>
+                <visualize>${visualize}</visualize>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+    <!-- ================= CONVENIENCE MACROS FOR FUTURE VARIANTS ================= -->
+    <!-- These macros provide reusable groups for common sensor configurations      -->
+    <!-- Allows easy composition for future variants (e.g., FR3 Duo only)           -->
+
+    <!-- All mobile platform sensors (RGB cameras, LiDARs, IMU) -->
+    <xacro:macro name="franka_gazebo_mobile_platform_sensors">
+        <xacro:franka_gazebo_camera link_reference="camera_front_link"
+                                    sensor_name="camera_front"
+                                    gz_topic="/camera_front/image_raw"/>
+        <xacro:franka_gazebo_camera link_reference="camera_rear_link"
+                                    sensor_name="camera_rear"
+                                    gz_topic="/camera_rear/image_raw"/>
+        <xacro:franka_gazebo_camera link_reference="camera_left_link"
+                                    sensor_name="camera_left"
+                                    gz_topic="/camera_left/image_raw"/>
+        <xacro:franka_gazebo_camera link_reference="camera_right_link"
+                                    sensor_name="camera_right"
+                                    gz_topic="/camera_right/image_raw"/>
+        <xacro:franka_gazebo_lidar link_reference="lidar_front"
+                                    sensor_name="lidar_front"
+                                    ros_topic="/lidar_front/scan"/>
+        <xacro:franka_gazebo_lidar link_reference="lidar_rear"
+                                    sensor_name="lidar_rear"
+                                    ros_topic="/lidar_rear/scan"/>
+        <xacro:franka_gazebo_body_imu link_reference="imu_body_link"
+                                      gz_topic="/imu/data"/>
+    </xacro:macro>
+
+    <!-- All vision and manipulation kit sensors (wrist D405 + head ZED) -->
+    <xacro:macro name="franka_gazebo_vision_kit_sensors">
+        <xacro:franka_gazebo_d405 
+            link_reference="left__wrist_camera_link"
+            sensor_name="left_wrist_camera"
+            gz_topic="/left_wrist_camera/image_raw"
+            width="640" height="480" />
+        <xacro:franka_gazebo_d405 
+            link_reference="right__wrist_camera_link"
+            sensor_name="right_wrist_camera"
+            gz_topic="/right_wrist_camera/image_raw"
+            width="640" height="480" />
+        <xacro:franka_gazebo_zed 
+            link_reference="head_camera_link"
+            sensor_name="head_camera"
+            gz_topic="/head_camera/image_raw"
+            width="672" height="376" />
+    </xacro:macro>
+
+</robot>

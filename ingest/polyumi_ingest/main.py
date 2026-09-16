@@ -1,0 +1,1256 @@
+"""
+ingest/main.py - PolyUMI ingest scripts to deal with pi's file & build pzarr stores.
+
+See docs/data-format.md for an overview of the pzarr format.
+"""
+
+import functools
+import inspect
+import json
+import logging
+import os
+import pathlib
+import shutil
+from collections import Counter
+from collections.abc import Callable
+from enum import Enum
+
+import typer
+from polyumi_pi.files.session import SessionFiles
+from rich.logging import RichHandler
+from rich.prompt import Confirm
+
+from polyumi_ingest import timing
+from polyumi_ingest.export.dp import MIN_SEGMENT_STEPS
+from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_mount, find_gopro_video
+from polyumi_ingest.pi_fetch import DEFAULT_HOST, PiFetch
+from polyumi_ingest.preproc import (
+    available_preprocessing_steps,
+    run_preprocessing,
+    run_preprocessing_on_recordings,
+)
+from polyumi_ingest.pzarr import FINGER_MP4, GOPRO_MP4, ensure_pzarr
+from polyumi_ingest.video_helpers import encode_session_video
+
+logging.basicConfig(
+    level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
+    format='%(message)s',
+    handlers=[
+        RichHandler(
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            rich_tracebacks=True,
+        )
+    ],
+)
+log = logging.getLogger('ingest')
+
+app = typer.Typer()
+
+
+def _human_size(n_bytes: int) -> str:
+    size = float(n_bytes)
+    unit = 'B'
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if size < 1024 or unit == 'TB':
+            break
+        size /= 1024
+    return f'{size:.1f} {unit}'
+
+
+# put this in the root of the repo
+DEFAULT_RECORDINGS_DIR = pathlib.Path(__file__).parent.parent.parent / 'recordings'
+
+
+@app.command()
+def fetch(
+    host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi (env: POLYUMI_PI_HOST).'),
+    output_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Local directory to write scenes into.',
+    ),
+    latest: bool = typer.Option(
+        False,
+        '--latest',
+        help='Only fetch the latest scene.',
+    ),
+    verbose_transfer: bool = typer.Option(
+        False,
+        '--verbose-transfer',
+        help='Show detailed transfer output for debugging.',
+    ),
+):
+    """Fetch recorded sessions from the Pi via tar-over-ssh."""
+    output_dir = output_dir.resolve()
+    pi = PiFetch(host)
+
+    if latest:
+        scene_name = pi.resolve_latest_scene()
+        scenes_to_fetch = [scene_name]
+        log.info(f'Latest scene: {scene_name}')
+    else:
+        log.info(f'Listing scenes on {host}...')
+        scenes_to_fetch = pi.list_remote_scenes()
+        log.info(f'Found {len(scenes_to_fetch)} scene(s) on {host}.')
+
+    if not scenes_to_fetch:
+        log.info('No scenes to fetch.')
+        raise typer.Exit()
+
+    # Plan per session, not per scene: a scene stays open on the Pi while episodes are recorded
+    # into it, so "the directory exists locally" says nothing about whether it is complete.
+    plan = pi.missing_sessions(output_dir, scenes_to_fetch)
+    n_grown = sum(1 for name in plan if (output_dir / name).exists())
+
+    n_skipped = len(scenes_to_fetch) - len(plan)
+    if n_skipped:
+        log.info(f'Skipping {n_skipped} scene(s) already fully fetched.')
+
+    if not plan:
+        log.info('Nothing new to fetch.')
+        raise typer.Exit()
+
+    n_sessions = sum(len(v) for v in plan.values())
+    n_new = len(plan) - n_grown
+    log.info(
+        f'{n_sessions} session(s) to fetch into {output_dir} '
+        f'({n_new} new scene(s), {n_grown} that grew since the last fetch).'
+    )
+    if not Confirm.ask('Proceed?', default=True):
+        log.info('Aborted.')
+        raise typer.Exit()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # One session per transfer rather than one stream for the lot: a dropped connection then
+    # costs the session in flight instead of every session after it, and a re-run resumes from
+    # where it stopped. Sessions are tens of MB, so the extra ssh handshakes are noise next to
+    # the payload.
+    fetched = 0
+    for scene_name, sessions in plan.items():
+        log.info(f'Fetching {len(sessions)} session(s) from {scene_name}...')
+        for session in sessions:
+            try:
+                pi.copy_sessions(scene_name, [session], output_dir, verbose=verbose_transfer)
+            # KeyboardInterrupt included deliberately: Ctrl-C is the most likely way a transfer
+            # dies, and it is not an Exception. tar extracts in place, so what it leaves behind
+            # is a directory holding part of a session. Whether the missing-session filter
+            # notices depends on whether metadata.json had landed yet — which is tar member
+            # order, i.e. the Pi's readdir order, i.e. nothing we control. Delete the partial
+            # copy and the question never arises; everything already transferred stays put.
+            except (RuntimeError, OSError, KeyboardInterrupt) as exc:
+                shutil.rmtree(output_dir / scene_name / session, ignore_errors=True)
+                log.error(f'{scene_name}/{session}: transfer failed, removed the partial copy: {exc!r}')
+                log.info(f'Fetched {fetched}/{n_sessions} session(s) before this. Re-run to resume.')
+                raise typer.Exit(1)
+            fetched += 1
+            log.info(f'  [{fetched}/{n_sessions}] {session}')
+
+    log.info(f'Done. Fetched {fetched} session(s) across {len(plan)} scene(s) to {output_dir}.')
+
+    log.info('Checking for GoPro SD card...')
+    try:
+        fetch_gopro(
+            recordings_dir=output_dir,
+            mount_point=None,
+            threshold_ms=DEFAULT_THRESHOLD_MS,
+            latest=False,
+        )
+    except typer.Exit as exc:
+        if exc.exit_code not in (None, 0):
+            raise
+        log.info('GoPro footage not copied — mount the SD card and run "pingest fetch-gopro" to add it.')
+
+
+@app.command()
+def process_video(
+    session_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Path to a local session directory.',
+    ),
+    fps: float = typer.Option(
+        10.0,
+        help=('Framerate to use for the output video. Overridden by session metadata if present.'),
+    ),
+    output_name: str = typer.Option(
+        FINGER_MP4,
+        help='Output video filename (placed in the session directory).',
+    ),
+    include_audio: bool = typer.Option(
+        True,
+        help='Mux audio.wav into the output if present.',
+    ),
+):
+    """Encode JPEG frames (and optionally audio) in a session directory into an MP4."""
+    try:
+        encode_session_video(session_path, fps, output_name, include_audio)
+    except RuntimeError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+
+@app.command(name='process-all')
+def process_all(
+    recordings_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Directory containing scene_* folders.',
+    ),
+    skip_gopro: bool = typer.Option(
+        False,
+        '--skip-gopro',
+        help='Skip GoPro frame ingestion.',
+    ),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        help='Rebuild zarr stores even if they already exist.',
+    ),
+):
+    """Build pzarr stores for all scenes under recordings_dir."""
+    from polyumi_ingest.pzarr import build_pzarr
+
+    recordings_dir = recordings_dir.resolve()
+    if not recordings_dir.is_dir():
+        log.error(f'Recordings directory not found: {recordings_dir}')
+        raise typer.Exit(1)
+
+    scene_dirs = sorted(p for p in recordings_dir.iterdir() if p.is_dir() and p.name.startswith('scene_'))
+    if not scene_dirs:
+        log.info(f'No scene_* directories found in {recordings_dir}')
+        raise typer.Exit()
+
+    to_process: list[pathlib.Path] = []
+    skipped: list[pathlib.Path] = []
+    for scene_dir in scene_dirs:
+        if (scene_dir / 'scene.zarr').exists() and not force:
+            skipped.append(scene_dir)
+        else:
+            to_process.append(scene_dir)
+
+    if skipped:
+        log.info(f'Skipping {len(skipped)} scene(s) with existing zarr stores.')
+
+    if not to_process:
+        log.info('Nothing to process.')
+        raise typer.Exit()
+
+    log.info(f'{len(to_process)} scene(s) to build.')
+    if not Confirm.ask('Proceed?', default=True):
+        log.info('Aborted.')
+        raise typer.Exit()
+
+    failures: list[tuple[pathlib.Path, str]] = []
+    for i, scene_dir in enumerate(to_process, 1):
+        log.info(f'[{i}/{len(to_process)}] Building {scene_dir.name}...')
+        try:
+            zarr_path = build_pzarr(scene_dir, skip_gopro=skip_gopro)
+            log.info(f'  -> {zarr_path}')
+        except Exception as e:
+            # Anything at all, not just RuntimeError: a scene that can't be built shouldn't
+            # abandon the scenes after it in the batch. Per-episode failures never reach here —
+            # build_pzarr flags those and keeps going (see episode_status).
+            failures.append((scene_dir, f'{type(e).__name__}: {e}'))
+            log.error(f'  Failed: {e}')
+
+    log.info(f'Done. Success: {len(to_process) - len(failures)}, Failed: {len(failures)}.')
+    if failures:
+        raise typer.Exit(1)
+
+
+@app.command(name='fetch-gopro')
+def fetch_gopro(
+    recordings_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Directory containing session_* folders.',
+    ),
+    mount_point: pathlib.Path | None = typer.Option(
+        None,
+        help='GoPro SD card mount point. Auto-detected when omitted.',
+    ),
+    threshold_ms: float = typer.Option(
+        DEFAULT_THRESHOLD_MS,
+        help='Maximum allowed delta (ms) between gopro_sync_time and the inferred recording start.',
+    ),
+    latest: bool = typer.Option(
+        False,
+        '--latest',
+        help='Only process the most recent session.',
+    ),
+):
+    """Copy GoPro SD card footage into session directories that don't already have it."""
+    recordings_dir = recordings_dir.resolve()
+    if not recordings_dir.is_dir():
+        log.error(f'Recordings directory not found: {recordings_dir}')
+        raise typer.Exit(1)
+
+    session_dirs = sorted(
+        p
+        for scene_dir in sorted(recordings_dir.iterdir())
+        if scene_dir.is_dir() and scene_dir.name.startswith('scene_')
+        for p in scene_dir.iterdir()
+        if p.is_dir() and p.name.startswith('session_')
+    )
+    if not session_dirs:
+        log.info(f'No scene_*/session_* directories found in {recordings_dir}')
+        raise typer.Exit()
+
+    if latest:
+        session_dirs = [session_dirs[-1]]
+
+    to_process: list[pathlib.Path] = []
+    skipped_existing: list[str] = []
+    skipped_no_sync: list[str] = []
+
+    output_name = GOPRO_MP4
+    for session_dir in session_dirs:
+        if (session_dir / output_name).exists():
+            skipped_existing.append(session_dir.name)
+            continue
+        try:
+            session = SessionFiles.from_file(session_dir)
+        except Exception as exc:
+            log.warning(f'Could not load metadata for {session_dir.name}: {exc}')
+            continue
+        if session.metadata.gopro_sync_time is None:
+            skipped_no_sync.append(session_dir.name)
+            continue
+        to_process.append(session_dir)
+
+    if skipped_existing:
+        log.info(f'Skipping {len(skipped_existing)} session(s) that already have {output_name}.')
+    if skipped_no_sync:
+        log.info(f'Skipping {len(skipped_no_sync)} session(s) with no gopro_sync_time: ' + ', '.join(skipped_no_sync))
+
+    if not to_process:
+        log.info('Nothing to do.')
+        raise typer.Exit()
+
+    log.info(f'{len(to_process)} session(s) to process.')
+
+    # Resolve the card once rather than per session. find_gopro_video would otherwise re-run
+    # the udisksctl/lsblk probe and re-log "Auto-detected GoPro SD card at ..." for every
+    # session. Cheap next to the ffprobe scan, but it also keeps the log readable. A None here
+    # is passed straight through so find_gopro_video raises its own "insert the card" error.
+    if mount_point is None:
+        mount_point = find_gopro_mount()
+
+    failures: list[tuple[str, str]] = []
+    for i, session_dir in enumerate(to_process, 1):
+        session = SessionFiles.from_file(session_dir)
+        sync_time = session.metadata.gopro_sync_time
+        assert sync_time is not None  # filtered above
+        log.info(f'[{i}/{len(to_process)}] {session_dir.name} (sync_time={sync_time.isoformat()})')
+        try:
+            src = find_gopro_video(
+                start_time=sync_time,
+                mount_point=mount_point,
+                threshold_ms=threshold_ms,
+            )
+        except (FileNotFoundError, RuntimeError) as exc:
+            log.error(f'  Failed: {exc}')
+            failures.append((session_dir.name, str(exc)))
+            continue
+
+        dst = session_dir / output_name
+        shutil.copy2(src, dst)
+        log.info(f'  -> {dst}')
+
+    log.info(f'Done. Success: {len(to_process) - len(failures)}, Failed: {len(failures)}.')
+    if failures:
+        raise typer.Exit(1)
+
+
+@app.command(name='inspect-zarr')
+def inspect_zarr(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    save_frame: pathlib.Path | None = typer.Option(
+        None,
+        help='Save the first frame of episode_0 as a PNG to this path.',
+    ),
+):
+    """Print the structure and metadata of a scene.zarr store."""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    from polyumi_ingest.pzarr import PZarrInfo, inspect_pzarr, read_frame
+
+    try:
+        info: PZarrInfo = inspect_pzarr(scene_path)
+    except FileNotFoundError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    console = Console()
+    console.print(f'\n[bold]Store:[/bold] {info.zarr_path}')
+    console.print(f'[bold]Format:[/bold] zarr v{info.zarr_format}, pzarr v{info.pzarr_version}\n')
+    console.print('[bold]Tree:[/bold]')
+    console.print(Text.from_ansi(str(info.tree)))
+    console.print('\n[bold]Scene metadata:[/bold]')
+    for k, v in sorted(info.attrs.items()):
+        console.print(f'  {k}: {v}')
+
+    def _fmt_rate(freq_hz: float | None) -> str:
+        if freq_hz is None:
+            return ''
+        if freq_hz >= 1000:
+            return f'{freq_hz / 1000:.1f} kHz'
+        return f'{freq_hz:.2f} Hz'
+
+    def _fmt_ts(ts_range: tuple[float, float] | None) -> str:
+        if ts_range is None:
+            return ''
+        return f'{ts_range[0]:.3f} → {ts_range[1]:.3f} s'
+
+    def _add_stream_row(table: Table, label: str, stream) -> None:
+        if stream.shape is None:
+            return
+        table.add_row(label, str(stream.shape), _fmt_rate(stream.freq_hz), _fmt_ts(stream.ts_range))
+
+    for ep in info.episodes:
+        duration = None
+        if ep.episode_start is not None and ep.episode_end is not None:
+            duration = ep.episode_end - ep.episode_start
+            console.print(f'\n[bold]Episode {ep.index}[/bold] ({duration:.0f}s):')
+        else:
+            console.print(f'\n[bold]Episode {ep.index}:[/bold]')
+        table = Table(show_header=True, header_style='bold cyan')
+        table.add_column('Array')
+        table.add_column('Shape')
+        table.add_column('Rate', justify='right')
+        table.add_column('Timestamps')
+        _add_stream_row(table, 'finger/frames', ep.finger)
+        _add_stream_row(table, 'finger/finger_piezo', ep.finger_piezo)
+        _add_stream_row(table, 'finger/finger_air', ep.finger_air)
+        _add_stream_row(table, 'gopro/frames', ep.gopro)
+        _add_stream_row(table, 'gopro/accl', ep.gopro_accl)
+        _add_stream_row(table, 'gopro/gyro', ep.gopro_gyro)
+        _add_stream_row(table, 'gopro/gps', ep.gopro_gps)
+        _add_stream_row(table, 'gopro/audio', ep.gopro_audio)
+        if duration is not None:
+            ep_info = f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s  ({duration:.2f} s)'
+            table.add_row('episode_start / end', '', '', ep_info)
+        console.print(table)
+
+    if info.optitrack is not None:
+        ot = info.optitrack
+        console.print('\n[bold]OptiTrack (scene-level):[/bold]')
+        ot_table = Table(show_header=True, header_style='bold cyan')
+        ot_table.add_column('Array')
+        ot_table.add_column('Shape')
+        ot_table.add_column('Rate', justify='right')
+        ot_table.add_column('Timestamps')
+        ot_table.add_row('optitrack/pose', str(ot.shape), _fmt_rate(ot.freq_hz), _fmt_ts(ot.ts_range))
+        console.print(ot_table)
+
+    total_bytes = sum(f.stat().st_size for f in info.zarr_path.rglob('*') if f.is_file())
+    console.print(f'\n[bold]Total size:[/bold] {_human_size(total_bytes)}')
+
+    if save_frame is not None:
+        from PIL import Image
+
+        frame = read_frame(scene_path)
+        Image.fromarray(frame).save(save_frame)
+        console.print(f'\nSaved episode_0 frame 0 → {save_frame}')
+
+
+@app.command(name='build-zarr')
+def build_zarr(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Path to a processed scene directory containing session_* subdirectories.',
+    ),
+    skip_gopro: bool = typer.Option(
+        False,
+        '--skip-gopro',
+        help='Skip GoPro frame ingestion.',
+    ),
+):
+    """Build a pzarr working-format zarr store from a processed scene directory."""
+    from polyumi_ingest.pzarr import build_pzarr
+
+    try:
+        zarr_path = build_pzarr(scene_path, skip_gopro=skip_gopro)
+        files = [f for f in zarr_path.rglob('*') if f.is_file()]
+        src_size = sum(f.stat().st_size for f in files)
+        log.info(f'Done. Zarr store written to {zarr_path} (total size: {_human_size(src_size)}).')
+    except NotImplementedError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+    except RuntimeError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+
+@app.command(name='pp')
+def preprocessing_pipeline(
+    step: int | None = typer.Argument(
+        None,
+        min=1,
+        help='Preprocessing step number. Omit to run every registered step in order.',
+    ),
+    scene: pathlib.Path | None = typer.Option(
+        None,
+        '--scene',
+        help='Scene directory or scene.zarr path. Omit to run on every scene under recordings_dir.',
+    ),
+    recordings_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Directory containing scene_* folders when --scene is omitted.',
+    ),
+    copy: bool = typer.Option(
+        False,
+        '--copy',
+        help='Write the step output to scene_pp[step].zarr instead of mutating scene.zarr.',
+    ),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        '-f',
+        help='Re-run a step even if it has already been marked complete.',
+    ),
+    skip_gopro: bool = typer.Option(
+        False,
+        '--skip-gopro',
+        help='Skip GoPro frame ingestion when auto-building missing pzarr stores.',
+    ),
+    list_steps: bool = typer.Option(
+        False,
+        '--list',
+        '-l',
+        help='List the available preprocessing steps and exit, without touching any scene.',
+    ),
+):
+    """Run a preprocessing step, or the full preprocessing pipeline, on scene zarr stores."""
+    if list_steps:
+        _print_preprocessing_steps()
+        return
+
+    # When no step is specified, auto-build scene.zarr for scenes that don't have one yet,
+    # so `pingest pp` works end-to-end on a freshly fetched scene directory.
+    auto_build = step is None
+    try:
+        if scene is not None:
+            if auto_build and scene.suffix != '.zarr':
+                ensure_pzarr(scene, skip_gopro=skip_gopro)
+            output = run_preprocessing(scene, step_number=step, copy=copy, force=force)
+            log.info(f'Done. Output: {output}')
+        else:
+            if auto_build:
+                recordings_dir_resolved = recordings_dir.resolve()
+                if recordings_dir_resolved.is_dir():
+                    for scene_dir in sorted(
+                        p for p in recordings_dir_resolved.iterdir() if p.is_dir() and p.name.startswith('scene_')
+                    ):
+                        # One unbuildable scene (no gopro.mp4 yet, unreadable sessions) must not
+                        # stop the batch — it just won't have a store for run_preprocessing to
+                        # find below, which is already reported as "no scene.zarr found".
+                        try:
+                            ensure_pzarr(scene_dir, skip_gopro=skip_gopro)
+                        except Exception as e:
+                            log.error(f'{scene_dir.name}: cannot build pzarr, skipping: {e}')
+            outputs = run_preprocessing_on_recordings(recordings_dir, step_number=step, copy=copy, force=force)
+            if outputs:
+                log.info(f'Done. Processed {len(outputs)} scene(s).')
+            else:
+                log.info('No scenes processed.')
+    # RuntimeError/NotImplementedError are build_pzarr's failure modes, which used to be turned
+    # into an exit code by the _build_pzarr wrapper this now bypasses.
+    except (FileNotFoundError, FileExistsError, KeyError, RuntimeError, NotImplementedError) as e:
+        log.exception(e)
+        raise typer.Exit(1)
+
+
+@app.command(name='copy-map')
+def copy_map(
+    source: pathlib.Path = typer.Argument(..., help='Scene whose atlas to reuse (dir or scene.zarr).'),
+    target: pathlib.Path = typer.Argument(..., help='Scene that should adopt it (dir or scene.zarr).'),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        help="Overwrite the target's existing atlas.",
+    ),
+):
+    """
+    Reuse one scene's ORB-SLAM3 atlas — its whole mapping pass — in another scene.
+
+    Copies the source's ``<scene>.atlas.osa`` to the target's conventional atlas path and
+    clears the target's step-2 marks, so ``pingest pp 2 --scene <target>`` relocalizes every
+    episode against the borrowed map instead of building one from the target's own mapping
+    walk. Both scenes then land in a single SLAM frame, which is the point: it is what makes
+    episodes recorded in separate scenes comparable, and it rescues a scene whose own mapping
+    walk came out poorly.
+
+    The target's own MAPPING session keeps whatever poses its own map build gave it — phase 2
+    never localizes the mapping session. Those poses stay in the abandoned frame, which is
+    harmless because DP export skips MAPPING sessions outright.
+    """
+    import zarr
+
+    from polyumi_ingest.preproc import clear_step_marks
+    from polyumi_ingest.preproc.slam_step import ATLAS_SOURCE_ATTR
+    from polyumi_ingest.pzarr.scene_files import SceneFiles
+
+    src = SceneFiles(path=SceneFiles.resolve_zarr_path(source).parent)
+    dst = SceneFiles(path=SceneFiles.resolve_zarr_path(target).parent)
+
+    if src.path == dst.path:
+        log.error('Source and target are the same scene.')
+        raise typer.Exit(1)
+    if not src.orb_slam3_atlas.exists():
+        log.error(f'No atlas at {src.orb_slam3_atlas} — run `pingest pp 2` on {src.path.name} first.')
+        raise typer.Exit(1)
+    if not dst.zarr_path.exists():
+        log.error(f'No scene.zarr found at {dst.path}')
+        raise typer.Exit(1)
+    if dst.orb_slam3_atlas.exists() and not force:
+        log.error(f'{dst.orb_slam3_atlas} already exists. Use --force to replace it.')
+        raise typer.Exit(1)
+
+    shutil.copy2(src.orb_slam3_atlas, dst.orb_slam3_atlas)
+    root = zarr.open_group(str(dst.zarr_path), mode='a')
+    root.attrs[ATLAS_SOURCE_ATTR] = src.path.name
+    # Step 2 only: re-running it invalidates the steps after it on its own.
+    clear_step_marks(root, [2])
+
+    log.info(f'Copied atlas from {src.path.name} ({_human_size(dst.orb_slam3_atlas.stat().st_size)}).')
+    log.info(f'Now run: pingest pp 2 --scene {dst.path}')
+
+
+@app.command(name='calibrate-gripper')
+def calibrate_gripper(
+    scene: pathlib.Path = typer.Option(
+        ...,
+        '--scene',
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    session: str | None = typer.Option(
+        None,
+        '--session',
+        help='Only use this episode key (e.g. episode_1). Default: pool every episode in the scene.',
+    ),
+):
+    """
+    Derive closed width, the ArUco tag separation with the gripper fully closed.
+
+    Record a scene in which the gripper is opened and closed fully several times in front of the
+    GoPro, holding it shut for a few seconds each cycle, then:
+
+        pingest pp 4 --scene <scene>        # detect the finger tags
+        pingest calibrate-gripper --scene <scene>
+
+    Reads the per-frame detections (``raw_widths_m``), NOT the resampled ``width_m`` series — the
+    latter is hold-extrapolated onto the GoPro grid and would drag the extremes around. See
+    polyumi_ingest.gripper_calib for why the output is a table rather than a single number.
+    """
+    import numpy as np
+    import zarr
+
+    from polyumi_ingest.episode_status import episode_keys
+    from polyumi_ingest.gripper_calib import closed_width_stats, format_report
+    from polyumi_ingest.pzarr.scene_files import SceneFiles
+
+    scene_zarr = SceneFiles.resolve_zarr_path(scene)
+    if not scene_zarr.exists():
+        log.error(f'No scene.zarr found at {scene}. Run `pingest pp 4 --scene {scene}` first.')
+        raise typer.Exit(1)
+
+    # Read-only: a calibration read must never restamp provenance or create groups, unlike the
+    # preprocessing steps' SceneContext.open (mode 'a').
+    root = zarr.open_group(str(scene_zarr), mode='r')
+    keys = [session] if session else episode_keys(root)
+
+    pooled: list[np.ndarray] = []
+    for key in keys:
+        path = f'{key}/annotations/gripper_width'
+        if path not in root:
+            log.warning(f'{key}: no gripper_width annotation; run `pingest pp 4 --force` on this scene.')
+            continue
+        grp = root[path]
+        widths = np.asarray(grp['raw_widths_m'][:], dtype=np.float64)  # type: ignore[index]
+        rate = float(grp.attrs.get('detection_rate', float('nan')))  # type: ignore[union-attr]
+        log.info(f'{key}: {widths.size} detections, {rate:.1%} of frames')
+        pooled.append(widths)
+
+    if not pooled:
+        log.error('No gripper-width detections found in any episode.')
+        raise typer.Exit(1)
+
+    try:
+        stats = closed_width_stats(np.concatenate(pooled))
+    except ValueError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    print()
+    print(format_report(stats))
+    print()
+    print('Put this in ingest/config/gripper_calib.yaml (the DP exporter reads it):')
+    print('  gripper_fingers:')
+    print(f'    closed_mm: {stats.closed_width_m * 1000:.2f}')
+    print(f'    open_mm: {stats.max_m * 1000:.2f}')
+
+
+@app.command(name='archive-scene')
+def archive_scene(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    output: pathlib.Path | None = typer.Option(
+        None,
+        help='Output path for the archive. Defaults to scene.zarr.zip inside the scene directory.',
+    ),
+    delete_zarr: bool = typer.Option(
+        False,
+        '--delete-zarr',
+        help='Delete source scene.zarr after successful archiving.',
+    ),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        help='Overwrite an existing archive.',
+    ),
+):
+    """
+    Archive a scene to a self-contained zip for at-rest storage.
+
+    Bundles scene.zarr together with each session's gopro.mp4 sidecar (the GoPro
+    frames are decoded on demand from the mp4, not stored in the zarr) and the
+    ORB-SLAM3 atlas if present. Paths are stored relative to the scene directory,
+    so unzipping reproduces ``<scene>/scene.zarr`` + ``<scene>/session_*/gopro.mp4``
+    — exactly the layout the frame reader resolves against.
+
+    ZIP_STORED (no re-compress): zarr chunks are already Blosc-compressed and the
+    mp4 is already an inter-frame codec, so deflate would only cost CPU.
+    """
+    import zipfile
+
+    from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
+
+    scene_path = scene_path.resolve()
+    zarr_path = SceneFiles.resolve_zarr_path(scene_path)
+
+    if not zarr_path.exists():
+        log.error(f'No scene.zarr found at {scene_path}')
+        raise typer.Exit(1)
+
+    scene_dir = zarr_path.parent
+    zip_path = output.resolve() if output else scene_dir / (zarr_path.name + '.zip')
+
+    if zip_path.exists():
+        if not force:
+            log.error(f'Archive already exists: {zip_path}. Use --force to overwrite.')
+            raise typer.Exit(1)
+        zip_path.unlink()
+
+    # scene.zarr contents + each session's gopro.mp4 + the atlas sidecar (if any).
+    files = [f for f in zarr_path.rglob('*') if f.is_file()]
+    gopro_mp4s = sorted(scene_dir.glob(f'session_*/{GOPRO_MP4}'))
+    files.extend(gopro_mp4s)
+    atlas = SceneFiles(path=scene_dir).orb_slam3_atlas
+    if atlas.exists():
+        files.append(atlas)
+
+    src_size = sum(f.stat().st_size for f in files)
+    log.info(f'Archiving {scene_dir.name} ({_human_size(src_size)}, {len(gopro_mp4s)} gopro.mp4) → {zip_path}')
+
+    # Paths relative to the scene dir so the zip mirrors the on-disk scene layout.
+    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_STORED) as zf:
+        for file_path in files:
+            zf.write(file_path, file_path.relative_to(scene_dir))
+
+    zip_size = zip_path.stat().st_size
+    log.info(f'Done. Archive: {_human_size(zip_size)} (source: {_human_size(src_size)})')
+
+    if delete_zarr:
+        if not Confirm.ask(f'Delete {zarr_path}?', default=False):
+            raise typer.Exit()
+        shutil.rmtree(zarr_path)
+        log.info(f'Deleted {zarr_path}')
+
+
+@app.command(name='export-mcap')
+def export_mcap(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    output_dir: pathlib.Path | None = typer.Option(
+        None,
+        help='Directory to write .mcap files. Defaults to the scene directory.',
+    ),
+    episode: int | None = typer.Option(
+        None,
+        help='Export only this episode index. Omit to export all episodes.',
+    ),
+    jpeg_quality: int = typer.Option(
+        85,
+        help='JPEG re-encode quality for video frames (1–100).',
+    ),
+    audio_chunk_size: int = typer.Option(
+        4096,
+        min=1,
+        help='Number of audio samples per RawAudio message.',
+    ),
+    gopro_video: bool = typer.Option(
+        True,
+        '--gopro-video/--no-gopro-video',
+        help='Include the /gopro/image channel. The wrist video re-encodes to ~275 MB per '
+        'episode, dwarfing every other channel; --no-gopro-video keeps GoPro audio and IMU.',
+    ),
+    skip_mapping: bool = typer.Option(
+        False,
+        help='Skip MAPPING sessions (long scene scans with no demonstration in them).',
+    ),
+):
+    """Export a pzarr scene to MCAP files for visualization in Foxglove."""
+    from polyumi_ingest.export.mcap import export_scene_to_mcap
+
+    try:
+        written = export_scene_to_mcap(
+            scene_path=scene_path,
+            output_dir=output_dir,
+            episode=episode,
+            jpeg_quality=jpeg_quality,
+            audio_chunk_size=audio_chunk_size,
+            include_gopro_video=gopro_video,
+            skip_mapping=skip_mapping,
+        )
+    except FileNotFoundError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    log.info(f'Exported {len(written)} episode(s):')
+    for path in written:
+        log.info(f'  {path}')
+
+
+def _write_provenance_sidecar(output_path: pathlib.Path, provenance: list[dict]) -> pathlib.Path:
+    """Write ``<output>.provenance.json`` beside a DP export, recording each episode's pose source."""
+    sidecar_path = output_path.with_suffix(output_path.suffix + '.provenance.json')
+    sidecar_path.write_text(json.dumps(provenance, indent=2))
+    return sidecar_path
+
+
+def _log_pose_source_summary(provenance: list[dict]) -> None:
+    """Log a one-line-per-episode summary of which pose source each episode exported from."""
+    for p in provenance:
+        log.info(f'  {p["scene"]}/{p["episode"]}: pose={p["source"]} ({p["n_steps"]} steps)')
+
+
+def _run_export(
+    export_fn: Callable[..., tuple[int, list[dict]]],
+    scene_paths: list[pathlib.Path],
+    output_path: pathlib.Path,
+    enforce_preprocessing: bool,
+    min_segment_steps: int,
+) -> None:
+    """Run one ``export.dp`` entry point and report the result — shared by every export command."""
+    try:
+        n, provenance = export_fn(
+            scene_paths,
+            output_path,
+            enforce_preprocessing=enforce_preprocessing,
+            min_segment_steps=min_segment_steps,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    _log_pose_source_summary(provenance)
+    sidecar_path = _write_provenance_sidecar(output_path, provenance)
+    log.info(f'Exported {n} episode(s) from {len(scene_paths)} scene(s) → {output_path} (provenance: {sidecar_path})')
+    totals = timing.dataset_time_totals(scene_paths, provenance)
+    at_rig = totals['scene_seconds']
+    log.info(
+        f'  time: {"unknown" if at_rig is None else f"{at_rig / 60:.1f} min"} at the rig, '
+        f'{totals["episode_seconds"] / 60:.1f} min recorded, '
+        f'{totals["exported_seconds"] / 60:.1f} min in the dataset'
+    )
+
+
+class ExportType(str, Enum):
+    """Which ``polyumi_ingest.export.dp`` entry point ``pingest export --type`` runs."""
+
+    dp = 'dp'
+    polyumi = 'polyumi'
+
+
+def _parse_finger_output_size(value: str | None) -> tuple[int, int] | None:
+    """
+    Parse a ``WxH`` finger-camera size, or None when unset.
+
+    Rejected rather than silently ignored on a malformed value: exporting a whole corpus at the
+    wrong resolution is only discovered when the policy refuses the shape hours later.
+    """
+    if value is None:
+        return None
+    parts = value.lower().split('x')
+    if len(parts) != 2 or not all(part.strip().isdigit() for part in parts):
+        raise typer.BadParameter(f'expected WxH (e.g. 224x224), got {value!r}')
+    width, height = (int(part) for part in parts)
+    if width < 1 or height < 1:
+        raise typer.BadParameter(f'dimensions must be positive, got {value!r}')
+    return (width, height)
+
+
+def _dry_run_export(
+    scene_paths: list[pathlib.Path],
+    modalities: list,
+    enforce_preprocessing: bool,
+    min_segment_steps: int,
+    as_json: bool,
+) -> None:
+    """
+    Report what an export would cut these scenes into, without decoding a single frame.
+
+    Answers "how much usable data do I actually have, and where does it go" in seconds rather
+    than the minutes a real export costs. It runs the exporter's own episode selection and its
+    own planner, and prints ``EpisodePlan.segment_record`` verbatim, so the preview cannot
+    disagree with what a real run would write.
+    """
+    from polyumi_ingest.config import load_closed_width_m, load_open_width_m
+    from polyumi_ingest.export.dp.buffer import iter_exportable_episodes, plan_episode_segments
+
+    # The planner logs a line or two per episode through RichHandler, which writes to stdout —
+    # harmless for the table, but it would corrupt --json into something no parser can read.
+    if as_json:
+        logging.getLogger().setLevel(logging.ERROR)
+
+    closed_width_m, open_width_m = load_closed_width_m(), load_open_width_m()
+
+    records: list[dict] = []
+    causes: Counter[str] = Counter()
+    n_dropped = 0
+    dropped_s = 0.0
+    try:
+        for scene_path in scene_paths:
+            for scene_label, ep_key, session_dir, ep, pose_source in iter_exportable_episodes(
+                scene_path, enforce_preprocessing=enforce_preprocessing, modalities=modalities
+            ):
+                plan, _, _ = plan_episode_segments(
+                    ep,
+                    f'{scene_label}/{ep_key}',
+                    pose_source,
+                    closed_width_m=closed_width_m,
+                    open_width_m=open_width_m,
+                    min_segment_steps=min_segment_steps,
+                    modalities=modalities,
+                )
+                n_dropped += len(plan.dropped)
+                dropped_s += sum(plan.duration_s(run) for run in plan.dropped)
+                for seg_i in range(len(plan.segments)):
+                    record = plan.segment_record(seg_i)
+                    causes[record['cut_start']] += 1
+                    causes[record['cut_end']] += 1
+                    records.append(
+                        {
+                            'scene': scene_label,
+                            'session': session_dir,
+                            'episode': ep_key,
+                            'source': pose_source,
+                            **record,
+                        }
+                    )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    if as_json:
+        typer.echo(json.dumps(records, indent=2))
+        return
+
+    by_session: dict[tuple[str, str], list[dict]] = {}
+    for r in records:
+        by_session.setdefault((r['scene'], r['episode']), []).append(r)
+    for (scene_label, ep_key), segs in by_session.items():
+        spans = ', '.join(f'{s["duration_s"]:.1f}s [{s["cut_start"]}->{s["cut_end"]}]' for s in segs)
+        typer.echo(f'  {scene_label}/{ep_key}: {len(segs)} segment(s)  {spans}')
+
+    total_s = sum(r['duration_s'] for r in records)
+    typer.echo(
+        f'\n{len(records)} segment(s) over {len(by_session)} session(s), {total_s / 60:.1f} min usable '
+        f'(floor {min_segment_steps} steps; {n_dropped} run(s) / {dropped_s / 60:.1f} min below it)'
+    )
+    if causes:
+        typer.echo('cut causes: ' + ', '.join(f'{k}={v}' for k, v in causes.most_common()))
+
+
+@app.command(name='export')
+def export_scenes(
+    scene_paths: list[pathlib.Path] = typer.Argument(
+        ...,
+        help='Scene directories (each containing scene.zarr) to combine into one ReplayBuffer. '
+        'One or more; multiple scenes are concatenated in the order given.',
+    ),
+    output_path: pathlib.Path = typer.Option(
+        None,
+        '--output',
+        '-o',
+        help='Output ReplayBuffer path (a .zarr.zip file). Required unless --dry-run.',
+    ),
+    exporter_type: ExportType = typer.Option(
+        ExportType.dp,
+        '--type',
+        help='dp: the visuomotor keys only. polyumi: dp, plus the contact mic (data/mic_0, '
+        'needs preprocessing step 6) and the finger camera (data/finger_rgb, needs no step '
+        'of its own). See docs/maniwav-audio-policy.md for the full contract.',
+    ),
+    finger_output_size: str | None = typer.Option(
+        None,
+        '--finger-output-size',
+        help='Resize finger_rgb to WxH (e.g. 224x224) instead of the native crop, for --type '
+        'polyumi. Omit to use config/finger_camera.yaml. The finger camera dominates a polyumi '
+        'buffer -- at the native 648x982 it is ~13x the bytes of camera0_rgb -- and a policy whose '
+        'encoder shares one image_shape across its rgb keys needs this to match camera0_rgb.',
+    ),
+    enforce_preprocessing: bool = typer.Option(
+        True,
+        '--enforce-preprocessing/--no-enforce-preprocessing',
+        help='Require the preprocessing steps this export depends on to be complete on each '
+        'scene — every step the visuomotor keys need, plus step 6 (contact-audio) for '
+        '--type polyumi. Disable to export a partially preprocessed scene; export can still '
+        'fail if outputs are missing, and the post-chirp start trim is applied independently '
+        'whenever the chirp-end marker is present, regardless of this flag.',
+    ),
+    min_segment_steps: int = typer.Option(
+        MIN_SEGMENT_STEPS,
+        '--min-segment-steps',
+        help='Shortest run of valid steps exported as its own episode. A session whose pose '
+        'source drops out is split into the runs either side; runs shorter than this are '
+        'discarded rather than emitted as episodes too short to sample a horizon from.',
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        '--dry-run',
+        help="Report what would be exported — one line per session, with each segment's span "
+        'and why it was cut there — and write nothing. Decodes no frames, so it costs seconds '
+        'rather than the minutes a real export does.',
+    ),
+    as_json: bool = typer.Option(
+        False, '--json', help='With --dry-run, emit the per-segment records as JSON instead of a table.'
+    ),
+):
+    """
+    Export pzarr scenes to a ReplayBuffer (.zarr.zip).
+
+    Poses come from eef/pose_<source>, written by preprocessing step 5 (eef-pose) for each
+    source the scene has (optitrack and/or slam); this command resolves which source each
+    episode exports from — its eef.attrs['default_source'] (optitrack if present, else slam)
+    unless overridden per-session in scene.json's pose_source_overrides. Frames are exported
+    at the native GoPro rate; the training config sets the observation rate via
+    obs_down_sample_steps. Scenes are concatenated in the order given, so several scenes are
+    indistinguishable from one big scene to UmiDataset. A per-episode pose-source provenance
+    record is written to <output>.provenance.json and embedded in the .zarr.zip's meta attrs.
+
+    `--type polyumi` adds `data/mic_0` (raw 16 kHz contact-mic waveform, one row per step —
+    raw rather than a spectrogram, since the log-mel belongs in the training container where
+    it can be computed after waveform-domain augmentation) and `data/finger_rgb` (the finger
+    camera, cropped to the region the gripper mount doesn't occlude, left at that resolution).
+
+    `--dry-run` reports the plan and writes nothing, in seconds rather than minutes: each
+    segment's span plus why it starts and ends where it does — episode_start/episode_end,
+    chirp (the idle prefix before the sync chirp), pose_gap (SLAM lost tracking), pose_jump (a
+    relocalization teleport past max_pose_jump_m), gripper_gap, or a modality name. Sweep the
+    length floor with --min-segment-steps, and note --type polyumi cuts more, since its extra
+    modalities narrow the valid span.
+    """
+    from polyumi_ingest.export.dp import export_scenes_to_dp, export_scenes_to_polyumi
+    from polyumi_ingest.export.dp.polyumi import POLYUMI_MODALITIES
+
+    if dry_run:
+        # Instantiated per run, exactly as export_scenes_to_polyumi does: a modality stashes
+        # per-episode state on self, so this needs its own instances, not the classes.
+        modalities = []
+        if exporter_type == ExportType.polyumi:
+            from polyumi_ingest.export.dp.finger_camera import FingerCameraModality
+
+            size = _parse_finger_output_size(finger_output_size)
+            modalities = [cls(output_size=size) if cls is FingerCameraModality else cls() for cls in POLYUMI_MODALITIES]
+        _dry_run_export(scene_paths, modalities, enforce_preprocessing, min_segment_steps, as_json)
+        return
+
+    if output_path is None:
+        log.error('--output/-o is required (omit it only with --dry-run).')
+        raise typer.Exit(1)
+    if exporter_type == ExportType.polyumi:
+        # Bound rather than added to _run_export's signature: only the polyumi exporter has a
+        # finger camera to size, and _run_export is shared with the visuomotor path.
+        export_fn = functools.partial(
+            export_scenes_to_polyumi,
+            finger_output_size=_parse_finger_output_size(finger_output_size),
+        )
+    else:
+        export_fn = export_scenes_to_dp
+    _run_export(export_fn, scene_paths, output_path, enforce_preprocessing, min_segment_steps)
+
+
+def _step_summary(step_cls: type) -> str:
+    """First line of a step class's docstring, with RST inline markup flattened for a terminal."""
+    doc = inspect.getdoc(step_cls)
+    if not doc:
+        return '(no description)'
+    return doc.splitlines()[0].replace('``', '')
+
+
+def _print_preprocessing_steps() -> None:
+    """Print the registered preprocessing steps, in execution order, with their summaries."""
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title='Preprocessing steps', title_justify='left', header_style='bold')
+    table.add_column('#', justify='right')
+    table.add_column('Name', style='bold')
+    table.add_column('What it does')
+    for step_cls in available_preprocessing_steps():
+        table.add_row(str(step_cls.step_number), step_cls.step_name, _step_summary(step_cls))
+
+    console = Console()
+    console.print()
+    console.print(table)
+    console.print('\nRun one:  [bold]pingest pp <#> --scene <scene>[/bold]')
+    console.print('Run all:  [bold]pingest pp --scene <scene>[/bold]\n')
+
+
+def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool) -> None:
+    """Rebuild pzarr for scene_dir from scratch, raising typer.Exit(1) on failure."""
+    from polyumi_ingest.pzarr import build_pzarr
+
+    try:
+        log.info(f'  -> {build_pzarr(scene_dir, skip_gopro=skip_gopro)}')
+    except (RuntimeError, NotImplementedError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+
+@app.command(name='debug-latest')
+def debug_latest(
+    host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi (env: POLYUMI_PI_HOST).'),
+    recordings_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Local directory containing scene_* folders.',
+    ),
+    skip_gopro: bool = typer.Option(
+        False,
+        '--skip-gopro',
+        help='Skip GoPro frame ingestion when building pzarr.',
+    ),
+    yes: bool = typer.Option(
+        False,
+        '--yes',
+        '-y',
+        help='Non-interactive: skip prompts and keep existing artifacts as-is.',
+    ),
+    run_pp: bool = typer.Option(
+        False,
+        '--pp',
+        help='Run the full preprocessing pipeline after building pzarr, before MCAP export.',
+    ),
+    jpeg_quality: int = typer.Option(85, help='JPEG re-encode quality for MCAP export (1–100).'),
+    audio_chunk_size: int = typer.Option(4096, min=1, help='Audio samples per RawAudio message.'),
+):
+    """
+    Fetch the latest scene, build its pzarr, and export the last episode to MCAP.
+
+    Useful for polyumi-pi development & testing the ingest pipeline quickly.
+    """
+    from polyumi_ingest.export.mcap import export_scene_to_mcap
+
+    recordings_dir = recordings_dir.resolve()
+    recordings_dir.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: fetch latest scene from Pi
+    pi = PiFetch(host)
+    scene_name = pi.resolve_latest_scene()
+    scene_dir = recordings_dir / scene_name
+    if scene_dir.exists():
+        log.info(f'Latest scene {scene_name} already fetched locally, skipping download.')
+        if not skip_gopro:
+            sessions_missing_gopro = [
+                p
+                for p in scene_dir.iterdir()
+                if p.is_dir() and p.name.startswith('session_') and not (p / GOPRO_MP4).exists()
+            ]
+            if sessions_missing_gopro:
+                log.info('GoPro video not yet present for some sessions, checking SD card...')
+                try:
+                    fetch_gopro(
+                        recordings_dir=recordings_dir,
+                        mount_point=None,
+                        threshold_ms=DEFAULT_THRESHOLD_MS,
+                        latest=False,
+                    )
+                except typer.Exit:
+                    pass
+    else:
+        log.info(f'Fetching latest scene: {scene_name}...')
+        pi.copy_scene(scene_name, scene_dir)
+        log.info(f'  -> {scene_dir}')
+
+    # Step 2: build pzarr
+    zarr_path = scene_dir / 'scene.zarr'
+    if zarr_path.exists():
+        if yes:
+            log.info(f'scene.zarr already exists for {scene_name}, skipping rebuild.')
+        elif not Confirm.ask(f'scene.zarr already exists for {scene_name}. Rebuild?', default=False):
+            log.info('Skipping pzarr rebuild.')
+        else:
+            _build_pzarr(scene_dir, skip_gopro)
+    else:
+        log.info(f'Building pzarr for {scene_name}...')
+        _build_pzarr(scene_dir, skip_gopro)
+
+    # Step 2.5: optionally run full preprocessing pipeline
+    if run_pp:
+        log.info('Running preprocessing pipeline...')
+        try:
+            output = run_preprocessing(scene_dir, step_number=None, copy=False, force=True)
+            log.info(f'  -> {output}')
+        except (FileNotFoundError, FileExistsError) as e:
+            log.error(str(e))
+            raise typer.Exit(1)
+
+    # Step 3: export last episode to MCAP
+    import zarr as _zarr
+
+    _root = _zarr.open_group(str(zarr_path), mode='r')
+    _ep_keys = sorted(k for k in _root.keys() if k.startswith('episode_'))
+    if not _ep_keys:
+        log.error(f'No episodes found in {zarr_path}')
+        raise typer.Exit(1)
+    last_ep = int(_ep_keys[-1].split('_')[-1])
+
+    mcap_path = scene_dir / f'episode_{last_ep}.mcap'
+    if mcap_path.exists():
+        if yes:
+            log.info(f'episode_{last_ep}.mcap already exists, skipping re-export.')
+            raise typer.Exit()
+        if not Confirm.ask(f'episode_{last_ep}.mcap already exists. Re-export?', default=False):
+            log.info('Skipping MCAP export.')
+            raise typer.Exit()
+        mcap_path.unlink()
+
+    log.info(f'Exporting episode {last_ep} to MCAP...')
+    try:
+        written = export_scene_to_mcap(
+            scene_path=scene_dir,
+            output_dir=scene_dir,
+            episode=last_ep,
+            jpeg_quality=jpeg_quality,
+            audio_chunk_size=audio_chunk_size,
+        )
+    except FileNotFoundError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    for p in written:
+        log.info(f'  -> {p}')
+
+
+if __name__ == '__main__':
+    app()
