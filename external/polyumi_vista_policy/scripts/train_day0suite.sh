@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Train hardcoded baseline policies on a PolyUMI multimodal export.
 #
-# Models: see_hear_feel, sparsh_x, polytouch, qformer, mitas, vta_diffusion
+# Models: see_hear_feel, sparsh_x, polytouch, qformer, VisTA, vta_diffusion
 #
 # Usage:
 #   DAY0SUITE_DATASET=/path/to/export.zarr.zip ./scripts/train_day0suite.sh
 #   ./scripts/train_day0suite.sh /path/to/export.zarr.zip
 #   ./scripts/train_day0suite.sh --model see_hear_feel
 #   ./scripts/train_day0suite.sh --model qformer
-#   ./scripts/train_day0suite.sh --model mitas
+#   ./scripts/train_day0suite.sh --model vista
 #   ./scripts/train_day0suite.sh --model vta_diffusion
 #   ./scripts/train_day0suite.sh --model qformer -- ablation=vt   # Qformer sensor ablation
 #   DRY_RUN=1 ./scripts/train_day0suite.sh
@@ -60,7 +60,7 @@ declare -A CONFIG_FOR=(
   [sparsh_x]=train_sparsh_x
   [polytouch]=train_polytouch
   [qformer]=train_qformer
-  [mitas]=train_mitas
+  [vista]=train_vista
   [vta_diffusion]=train_vta_diffusion
 )
 
@@ -92,7 +92,7 @@ should_run() {
 }
 
 train_suite() {
-  for model in see_hear_feel sparsh_x polytouch qformer mitas vta_diffusion; do
+  for model in see_hear_feel sparsh_x polytouch qformer vista vta_diffusion; do
     if should_run "$model"; then
       run_train "$model" "${CONFIG_FOR[$model]}"
     fi
@@ -101,7 +101,7 @@ train_suite() {
 
 if [[ -n "$MODEL_FILTER" ]]; then
   case "$MODEL_FILTER" in
-    see_hear_feel | sparsh_x | polytouch | qformer | mitas | vta_diffusion) ;;
+    see_hear_feel | sparsh_x | polytouch | qformer | vista | vta_diffusion) ;;
     *)
       echo "Unknown model '${MODEL_FILTER}'. Choose from: see_hear_feel sparsh_x polytouch qformer mitas vta_diffusion" >&2
       exit 1
