@@ -1,4 +1,4 @@
-"""Vista multimodal models — paper baselines + Qformer / Mitas / VTADiffusion."""
+"""Vista multimodal models — paper baselines + Qformer / Vista / VTADiffusion."""
 
 from vista.models.vista import VisTAPolicy
 from vista.models.polytouch import PolyTouchPolicy
