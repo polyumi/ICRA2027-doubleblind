@@ -30,7 +30,7 @@ class _ProprioToken(nn.Module):
     """Encode proprio into fusion tokens.
 
     With ``mean_over_time=True`` (Qformer): mean over H → 1 token.
-    With ``mean_over_time=False`` (Mitas): encode each timestep → H tokens.
+    With ``mean_over_time=False`` (VisTA): encode each timestep → H tokens.
     """
 
     def __init__(
