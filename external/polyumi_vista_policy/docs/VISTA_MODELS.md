@@ -31,7 +31,7 @@ Audio uses a contiguous `audio_obs_horizon` (default **10**, ~0.33 s) → shared
 | `SparshXPolicy` | [`sparsh_x.py`](../vista/models/sparsh_x.py) | MBT bottleneck (reimpl.) | DiT + flow matching |
 | `PolyTouchPolicy` | [`polytouch.py`](../vista/models/polytouch.py) | 6×12 CLIP↔T3 cross-attn; 3 CLS concat | Diffusion U-Net |
 | `QformerPolicy` | [`qformer.py`](../vista/models/qformer.py) | CNN stems → 6-layer Q-Former | DiT + flow matching |
-| `MitasPolicy` | [`mitas.py`](../vista/models/mitas.py) | CNN stems → TransformerEncoder | DiT + flow matching (AdaLN-zero) |
+| `VisTAPolicy` | [`mitas.py`](../vista/models/vista.py) | CNN stems → TransformerEncoder | DiT + flow matching (AdaLN-zero) |
 
 ### QformerPolicy
 
@@ -56,7 +56,7 @@ python train_vista.py --config-name=train_see_hear_feel task.dataset_path=/path/
 python train_vista.py --config-name=train_sparsh_x task.dataset_path=/path/to.zarr.zip
 python train_vista.py --config-name=train_polytouch task.dataset_path=/path/to.zarr.zip
 python train_vista.py --config-name=train_qformer task.dataset_path=/path/to.zarr.zip
-python train_vista.py --config-name=train_mitas task.dataset_path=/path/to.zarr.zip
+python train_vista.py --config-name=train_vista task.dataset_path=/path/to.zarr.zip
 
 # Qformer / Mitas sensor ablations (compose Hydra ablation/*.yaml → policy.sensor_group)
 python train_vista.py --config-name=train_qformer ablation=v task.dataset_path=/path/to.zarr.zip
@@ -66,38 +66,38 @@ python train_vista.py --config-name=train_qformer ablation=vta task.dataset_path
 python train_vista.py --config-name=train_mitas ablation=vt task.dataset_path=/path/to.zarr.zip
 ```
 
-Or `./scripts/train_day0suite.sh --model mitas` (full `vta`); pass Hydra overrides after `--`, e.g. `./scripts/train_day0suite.sh --model qformer -- ablation=vt`.
+Or `./scripts/train_day0suite.sh --model vista` (full `vta`); pass Hydra overrides after `--`, e.g. `./scripts/train_day0suite.sh --model qformer -- ablation=vt`.
 
-### MitasPolicy
+### VisTA Policy
 
 - **Encoders:** Same CNN stems / embeddings / shared log-mel as Qformer; full context (~294 at `vta`, H=2 with 2 proprio tokens) kept (no query bottleneck). Proprio is one token per history step (no mean-pool).
 - **Fusion:** `TransformerEncoder` (`fusion_mode=joint`, default) or per-sensor encoders then concat (`fusion_mode=per_sensor`, `fusion_layers=2` for param match at `vta`).
 - **Head:** DiT (AdaLN-zero) + `objective_type=flow_matching` (default) or `diffusion` (DDPM ε); conditions on fused tokens (`max_cond_tokens=320`).
 - **Sensor ablation:** Same `sensor_group` as Qformer; context length shrinks.
 
-**Train MiTas ablations** (Hydra overlays under `vista/config/ablation/`):
+**Train VisTA ablations** (Hydra overlays under `vista/config/ablation/`):
 
 ```bash
-# Default MiTas (joint fusion + flow matching, full vta)
-python train_vista.py --config-name=train_mitas task.dataset_path=/path/to.zarr.zip
+# Default VisTA (joint fusion + flow matching, full vta)
+python train_vista.py --config-name=train_vista task.dataset_path=/path/to.zarr.zip
 
 # Diffusion objective (same DiT; DDPM epsilon, 16 infer steps)
-python train_vista.py --config-name=train_mitas ablation=objective_diffusion \
+python train_vista.py --config-name=train_vista ablation=objective_diffusion \
   task.dataset_path=/path/to.zarr.zip
 
 # Per-sensor fusion (no cross-modal attn; fusion_layers=2 ≈ joint param count @ vta)
-python train_vista.py --config-name=train_mitas ablation=fusion_per_sensor \
+python train_vista.py --config-name=train_vista ablation=fusion_per_sensor \
   task.dataset_path=/path/to.zarr.zip
 
 # Compose both via policy overrides (ablation group is single-select)
-python train_vista.py --config-name=train_mitas \
+python train_vista.py --config-name=train_vista \
   policy.objective_type=diffusion policy.n_inference_steps=16 \
   policy.num_train_timesteps=100 policy.input_perturb=0.1 \
   policy.fusion_mode=per_sensor policy.fusion_layers=2 \
   task.dataset_path=/path/to.zarr.zip
 
 # Sensor group + fusion ablation (set sensor_group on CLI; fusion overlay)
-python train_vista.py --config-name=train_mitas ablation=fusion_per_sensor \
+python train_vista.py --config-name=train_vista ablation=fusion_per_sensor \
   policy.sensor_group=vt task.dataset_path=/path/to.zarr.zip
 ```
 
