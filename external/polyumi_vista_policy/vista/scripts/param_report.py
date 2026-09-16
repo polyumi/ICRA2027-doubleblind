@@ -337,7 +337,7 @@ def build_model(
     if name == "vista":
         from vista.models.vista import VisTAPolicy
 
-        return MitasPolicy(
+        return VisTAPolicy(
             shape,
             n_obs_steps=2,
             sensor_group=sensor_group,
