@@ -8,7 +8,7 @@ Examples:
   python -m vista.scripts.param_report --model diffusion_unet
   python -m vista.scripts.param_report --model qformer
   python -m vista.scripts.param_report --all --breakdown
-  python -m vista.scripts.param_report --model mitas --sensor-group vt
+  python -m vista.scripts.param_report --model vista --sensor-group vt
 """
 
 from __future__ import annotations
@@ -334,8 +334,8 @@ def build_model(
             qformer_layers=8,
             dit_layers=12,
         )
-    if name == "mitas":
-        from vista.models.mitas import MitasPolicy
+    if name == "vista":
+        from vista.models.vista import VisTAPolicy
 
         return MitasPolicy(
             shape,
@@ -366,7 +366,7 @@ MODEL_CHOICES = (
     "sparsh_x",
     "polytouch",
     "qformer",
-    "mitas",
+    "vista",
     "vta_diffusion",
 )
 
@@ -383,7 +383,7 @@ def report_model(
     label = name
     if name == "diffusion_unet":
         label = "diffusion_unet (PolyUMI CLIP-ViT + Unet1D)"
-    if name in ("qformer", "mitas"):
+    if name in ("qformer", "vista"):
         label = f"{name} (sensor_group={sensor_group})"
     if name == "polytouch" and lite:
         label = f"{name} (lite)"
@@ -418,7 +418,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "--sensor-group",
         default="vta",
         choices=["v", "vt", "va", "vta"],
-        help="Qformer/Mitas sensor ablation group",
+        help="Qformer/VisTA sensor ablation group",
     )
     parser.add_argument(
         "--breakdown",
