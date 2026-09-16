@@ -13,6 +13,11 @@ It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.git
 
 <div align="center" style="display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;">
   <div style="flex: 1 1 480px; min-width: 320px; max-width: 600px;">
+    <img src="docs/data_overview.png" alt="System Overview" style="width: 100%;"/>
+    <p style="margin: 6px 0 0; font-size: 0.9em; color: #666;">PolyUMI system overview.</p>
+  </div>
+<div align="center" style="display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;">
+  <div style="flex: 1 1 480px; min-width: 320px; max-width: 600px;">
     <img src="docs/dataflow_overview.png" alt="Dataflow Overview" style="width: 100%;"/>
     <p style="margin: 6px 0 0; font-size: 0.9em; color: #666;">Data flow through the PolyUMI system.</p>
   </div>
