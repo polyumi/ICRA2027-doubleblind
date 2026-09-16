@@ -1,4 +1,4 @@
-"""Sensor ablation for QformerPolicy / MitasPolicy: dropped sensors are not encoded."""
+"""Sensor ablation for QformerPolicy / VisTAPolicy: dropped sensors are not encoded."""
 
 import numpy as np
 import torch
@@ -10,7 +10,7 @@ from diffusion_policy.common.normalize_util import (
 )
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from vista.models.sensor_ablation import SENSOR_GROUPS
-from vista.models.mitas import MitasPolicy
+from vista.models.vista import VisTAPolicy
 from vista.models.qformer import QformerPolicy
 
 N_OBS = 2
@@ -81,7 +81,7 @@ def _lite_kwargs():
     )
 
 
-def _mitas_lite_kwargs():
+def _vista_lite_kwargs():
     return dict(
         d_embed=64,
         fusion_layers=1,
@@ -136,24 +136,24 @@ def test_all_sensor_groups_forward():
         assert pred["action"].shape == (2, 16, 10)
 
 
-def test_mitas_ablation_builds_only_active_encoders():
+def test_vista_ablation_builds_only_active_encoders():
     shape = _shape_meta()
-    vt = MitasPolicy(shape, n_obs_steps=N_OBS, sensor_group="vt", **_mitas_lite_kwargs())
+    vt = VisTAPolicy(shape, n_obs_steps=N_OBS, sensor_group="vt", **_vista_lite_kwargs())
     assert vt.vision_tok is not None
     assert vt.tactile_tok is not None
     assert vt.audio_tok is None
     assert vt.log_mel is None
 
-    v = MitasPolicy(shape, n_obs_steps=N_OBS, sensor_group="v", **_mitas_lite_kwargs())
+    v = VisTAPolicy(shape, n_obs_steps=N_OBS, sensor_group="v", **_vista_lite_kwargs())
     assert v.vision_tok is not None
     assert v.tactile_tok is None
     assert v.audio_tok is None
 
 
-def test_mitas_ablation_context_shrinks_and_predict():
+def test_vista_ablation_context_shrinks_and_predict():
     shape = _shape_meta()
-    policy = MitasPolicy(
-        shape, n_obs_steps=N_OBS, sensor_group="vt", **_mitas_lite_kwargs()
+    policy = VisTAPolicy(
+        shape, n_obs_steps=N_OBS, sensor_group="vt", **_vista_lite_kwargs()
     )
     policy.set_normalizer(_identity_normalizer(shape))
     batch = _batch()
@@ -167,26 +167,26 @@ def test_mitas_ablation_context_shrinks_and_predict():
     assert pred["action"].shape == (2, 16, 10)
 
 
-def test_mitas_all_sensor_groups_forward():
+def test_vista_all_sensor_groups_forward():
     shape = _shape_meta()
     batch = _batch()
     for group in SENSOR_GROUPS:
-        policy = MitasPolicy(
-            shape, n_obs_steps=N_OBS, sensor_group=group, **_mitas_lite_kwargs()
+        policy = VisTAPolicy(
+            shape, n_obs_steps=N_OBS, sensor_group=group, **_vista_lite_kwargs()
         )
         policy.set_normalizer(_identity_normalizer(shape))
         pred = policy.predict_action(batch["obs"])
         assert pred["action"].shape == (2, 16, 10)
 
 
-def test_mitas_per_sensor_ablation_builds_only_active_encoders():
+def test_vista_per_sensor_ablation_builds_only_active_encoders():
     shape = _shape_meta()
-    vt = MitasPolicy(
+    vt = VisTAPolicy(
         shape,
         n_obs_steps=N_OBS,
         sensor_group="vt",
         fusion_mode="per_sensor",
-        **_mitas_lite_kwargs(),
+        **_vista_lite_kwargs(),
     )
     assert vt.vision_tok is not None
     assert vt.tactile_tok is not None
@@ -194,12 +194,12 @@ def test_mitas_per_sensor_ablation_builds_only_active_encoders():
     assert set(vt.fusion.encoders.keys()) == {"camera0_rgb", "finger_rgb", "proprio"}
     assert "mic_0" not in vt.fusion.encoders
 
-    policy = MitasPolicy(
+    policy = VisTAPolicy(
         shape,
         n_obs_steps=N_OBS,
         sensor_group="vt",
         fusion_mode="per_sensor",
-        **_mitas_lite_kwargs(),
+        **_vista_lite_kwargs(),
     )
     policy.set_normalizer(_identity_normalizer(shape))
     batch = _batch()
