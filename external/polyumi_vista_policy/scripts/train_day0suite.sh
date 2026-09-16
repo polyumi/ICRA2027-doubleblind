@@ -103,7 +103,7 @@ if [[ -n "$MODEL_FILTER" ]]; then
   case "$MODEL_FILTER" in
     see_hear_feel | sparsh_x | polytouch | qformer | vista | vta_diffusion) ;;
     *)
-      echo "Unknown model '${MODEL_FILTER}'. Choose from: see_hear_feel sparsh_x polytouch qformer mitas vta_diffusion" >&2
+      echo "Unknown model '${MODEL_FILTER}'. Choose from: see_hear_feel sparsh_x polytouch qformer vista vta_diffusion" >&2
       exit 1
       ;;
   esac
