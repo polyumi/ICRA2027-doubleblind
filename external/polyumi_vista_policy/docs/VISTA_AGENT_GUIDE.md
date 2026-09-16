@@ -17,8 +17,8 @@ Each model is **one `nn.Module` class** subclassing [`BaseVistaPolicy`](../vista
 ```
 obs (B, N, …)
   → shared-weight encoders (per timestep / history)
-  → paper / Qformer / Mitas fusion
-  → paper / Qformer / Mitas head
+  → paper / Qformer / VisTA fusion
+  → paper / Qformer / VisTA head
   → action chunk (B, H, 10)
 ```
 
@@ -53,7 +53,7 @@ vista/
   encoders/shf_resnet.py  # SHF CoordConv ResNet (vendored MIT)
   fusion/mbt.py           # MBT reimplementation (not Meta code)
   fusion/qformer.py       # Q-Former (stacked self + multi cross + MLP)
-  fusion/transformer.py   # TransformerEncoder fusion (Mitas)
+  fusion/transformer.py   # TransformerEncoder fusion (VisTA)
   fusion/polytouch_combiner.py
   heads/dit.py            # TransformerDenoiser (DiT)
   data/vista_dataset.py
