@@ -1,4 +1,4 @@
-"""Sparsh-style tactile-centric fusion (mitas port)."""
+"""Sparsh-style tactile-centric fusion (Vista port)."""
 
 from typing import Dict, Optional, Tuple
 
