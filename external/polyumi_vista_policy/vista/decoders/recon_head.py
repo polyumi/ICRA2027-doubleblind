@@ -1,4 +1,4 @@
-"""Reconstruction heads for masked pretraining (mitas port)."""
+"""Reconstruction heads for masked pretraining (VisTA port)."""
 
 from typing import Dict, Optional
 
