@@ -31,7 +31,7 @@ Audio uses a contiguous `audio_obs_horizon` (default **10**, ~0.33 s) → shared
 | `SparshXPolicy` | [`sparsh_x.py`](../vista/models/sparsh_x.py) | MBT bottleneck (reimpl.) | DiT + flow matching |
 | `PolyTouchPolicy` | [`polytouch.py`](../vista/models/polytouch.py) | 6×12 CLIP↔T3 cross-attn; 3 CLS concat | Diffusion U-Net |
 | `QformerPolicy` | [`qformer.py`](../vista/models/qformer.py) | CNN stems → 6-layer Q-Former | DiT + flow matching |
-| `VisTAPolicy` | [`mitas.py`](../vista/models/vista.py) | CNN stems → TransformerEncoder | DiT + flow matching (AdaLN-zero) |
+| `VisTAPolicy` | [`vista.py`](../vista/models/vista.py) | CNN stems → TransformerEncoder | DiT + flow matching (AdaLN-zero) |
 
 ### QformerPolicy
 
@@ -63,7 +63,7 @@ python train_vista.py --config-name=train_qformer ablation=v task.dataset_path=/
 python train_vista.py --config-name=train_qformer ablation=vt task.dataset_path=/path/to.zarr.zip
 python train_vista.py --config-name=train_qformer ablation=va task.dataset_path=/path/to.zarr.zip
 python train_vista.py --config-name=train_qformer ablation=vta task.dataset_path=/path/to.zarr.zip
-python train_vista.py --config-name=train_mitas ablation=vt task.dataset_path=/path/to.zarr.zip
+python train_vista.py --config-name=train_vista ablation=vt task.dataset_path=/path/to.zarr.zip
 ```
 
 Or `./scripts/train_day0suite.sh --model vista` (full `vta`); pass Hydra overrides after `--`, e.g. `./scripts/train_day0suite.sh --model qformer -- ablation=vt`.
