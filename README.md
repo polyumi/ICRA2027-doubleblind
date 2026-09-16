@@ -1,7 +1,7 @@
 # PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning
 
 **Project website:** withheld for double-blind review<br>
-**Hardware build guide:** withheld for double-blind review
+**[Hardware build guide](https://docs.google.com/document/d/1HTwjLjrNoQFs5rB2DTdoAflJh1zYnw8AD4wD-CD382k/edit?usp=sharing)**
 
 PolyUMI is an imitation learning platform supporting UMI-style data collection via a handheld gripper, which unifies the following sensor modalities in a single end-effector:
 - **touch** (via a custom optical tactile-sensing finger, based on [PolyTouch](https://polytouch.alanz.info/)) - *10fps 540x480 MJPEG video (MP4)*
