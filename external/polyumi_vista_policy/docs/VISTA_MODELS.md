@@ -58,7 +58,7 @@ python train_vista.py --config-name=train_polytouch task.dataset_path=/path/to.z
 python train_vista.py --config-name=train_qformer task.dataset_path=/path/to.zarr.zip
 python train_vista.py --config-name=train_vista task.dataset_path=/path/to.zarr.zip
 
-# Qformer / Mitas sensor ablations (compose Hydra ablation/*.yaml → policy.sensor_group)
+# Qformer / Vista sensor ablations (compose Hydra ablation/*.yaml → policy.sensor_group)
 python train_vista.py --config-name=train_qformer ablation=v task.dataset_path=/path/to.zarr.zip
 python train_vista.py --config-name=train_qformer ablation=vt task.dataset_path=/path/to.zarr.zip
 python train_vista.py --config-name=train_qformer ablation=va task.dataset_path=/path/to.zarr.zip
@@ -101,6 +101,6 @@ python train_vista.py --config-name=train_vista ablation=fusion_per_sensor \
   policy.sensor_group=vt task.dataset_path=/path/to.zarr.zip
 ```
 
-Or `./scripts/train_day0suite.sh --model mitas -- ablation=fusion_per_sensor`.
+Or `./scripts/train_day0suite.sh --model vista -- ablation=fusion_per_sensor`.
 
 Touch-in-the-Wild is **not** implemented.
